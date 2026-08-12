@@ -1,0 +1,15 @@
+import { google } from 'googleapis'; import { parse, toSeconds } from 'iso8601-duration';
+export type RetentionPoint = { video_id: string; position_ratio: number; position_seconds: number; audience_watch_ratio: number };
+export function normalizeRetention(videoId: string, duration: number, rows: unknown[][]): RetentionPoint[] { return rows.map(([ratio, watch]) => { const position = Number(ratio); if (position < 0 || position > 1) throw new Error('YouTube returned an invalid normalized position'); return { video_id: videoId, position_ratio: position, position_seconds: position * duration, audience_watch_ratio: Number(watch) }; }); }
+export function oauthClient() { const payload = JSON.parse(required('YOUTUBE_OAUTH_TOKEN_JSON')); const client = new google.auth.OAuth2(payload.client_id, payload.client_secret, payload.redirect_uri); client.setCredentials({ access_token: payload.access_token, refresh_token: payload.refresh_token, expiry_date: payload.expiry_date, token_type: payload.token_type, scope: payload.scope }); return client; }
+export async function readCreatorRetention() {
+  const auth = oauthClient(); const youtube = google.youtube({ version: 'v3', auth }); const analytics = google.youtubeAnalytics({ version: 'v2', auth });
+  const channelResponse = await youtube.channels.list({ part: ['id', 'contentDetails'], mine: true }); const channels = channelResponse.data.items || []; if (channels.length !== 1) throw new Error('Expected one authorized creator channel');
+  const channel = channels[0]; const channelId = channel.id!; const playlistId = channel.contentDetails?.relatedPlaylists?.uploads; if (!playlistId) throw new Error('Authorized channel has no uploads playlist');
+  const playlist = await youtube.playlistItems.list({ part: ['contentDetails'], playlistId, maxResults: Math.min(50, Number(process.env.YOUTUBE_VIDEO_LIMIT || 10)) }); const ids = (playlist.data.items || []).map((item) => item.contentDetails?.videoId).filter((id): id is string => Boolean(id));
+  if (!ids.length) return { channelId, videos: [] };
+  const metadata = await youtube.videos.list({ part: ['snippet', 'contentDetails'], id: ids }); const videos = [];
+  for (const video of metadata.data.items || []) { if (!video.id || !video.contentDetails?.duration) continue; const durationSeconds = toSeconds(parse(video.contentDetails.duration)); const report = await analytics.reports.query({ ids: 'channel==MINE', startDate: process.env.YOUTUBE_START_DATE || '2006-01-01', endDate: new Date().toISOString().slice(0, 10), metrics: 'audienceWatchRatio', dimensions: 'elapsedVideoTimeRatio', filters: `video==${video.id}`, sort: 'elapsedVideoTimeRatio' }); videos.push({ video: { video_id: video.id, channel_id: channelId, title: video.snippet?.title || video.id, published_at: video.snippet?.publishedAt || new Date(0).toISOString(), duration_seconds: Math.round(durationSeconds) }, points: normalizeRetention(video.id, durationSeconds, (report.data.rows || []) as unknown[][]) }); }
+  return { channelId, videos };
+}
+const required = (name: string) => { const value = process.env[name]; if (!value) throw new Error(`${name} is required`); return value; };

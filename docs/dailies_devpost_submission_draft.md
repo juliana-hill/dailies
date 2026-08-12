@@ -84,7 +84,7 @@ model-context-protocol
 mcp
 youtube-analytics-api
 cloud-run
-python
+node.js
 typescript
 react
 secret-manager

@@ -5,13 +5,18 @@
   "workspaces": [
     "frontend",
     "api",
-    "shared"
+    "shared",
+    "agents",
+    "ingestion"
   ],
   "scripts": {
     "dev:frontend": "npm --workspace frontend run dev",
     "dev:api": "npm --workspace api run dev",
-    "build": "npm run build --workspaces",
-    "test": "npm run test --workspaces"
+    "dev:agents": "npm --workspace agents run dev",
+    "dev:ingestion": "npm --workspace ingestion run dev",
+    "build": "npm --workspace shared run build && npm --workspace api run build && npm --workspace agents run build && npm --workspace ingestion run build && npm --workspace frontend run build",
+    "test": "npm --workspace shared run build && npm run test --workspaces --if-present",
+    "audit:ai-policy": "node scripts/audit-ai-dependencies.mjs"
   },
   "engines": {
     "node": ">=20"

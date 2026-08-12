@@ -1,0 +1,9 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { api, ApiClientError } from './api';
+
+afterEach(() => vi.unstubAllGlobals());
+describe('frontend API client', () => {
+  it('loads the authenticated user with credentials', async () => { const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ user: { id: '1' } }) }); vi.stubGlobal('fetch', fetch); expect((await api.me()).user.id).toBe('1'); expect(fetch).toHaveBeenCalledWith('/api/me', expect.objectContaining({ credentials: 'include' })); });
+  it('surfaces retryable service errors', async () => { vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 503, json: async () => ({ error: { code: 'QUOTA', message: 'Lyria quota unavailable', retryable: true } }) })); await expect(api.project('p')).rejects.toMatchObject({ code: 'QUOTA', retryable: true }); });
+  it('uploads the real file body to the controlled endpoint', async () => { const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ status: 'uploaded' }) }); vi.stubGlobal('fetch', fetch); const file = new Blob(['video'], { type: 'video/mp4' }); await api.upload({ url: '/api/projects/p/upload', method: 'POST', headers: {} }, file, 10); expect(fetch.mock.calls[0][1].body).toBe(file); });
+});

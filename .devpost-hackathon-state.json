@@ -11,9 +11,9 @@
   },
   "learning": {
     "status": "active",
-    "current_step": "scope",
-    "completed_steps": [],
-    "plan_file": "docs/hackathon-build/scope.md",
-    "next_command": "build-scope"
+    "current_step": "build",
+    "completed_steps": ["checklist"],
+    "plan_file": "docs/hackathon-build/checklist.md",
+    "next_command": "build-project"
   }
 }

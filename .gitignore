@@ -1,4 +1,8 @@
 node_modules/
 frontend/dist/
+api/dist/
+shared/dist/
+agents/dist/
+ingestion/dist/
 *.log
 .DS_Store

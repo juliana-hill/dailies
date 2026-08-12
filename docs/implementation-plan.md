@@ -59,7 +59,7 @@ The official rules and live documentation must be rechecked immediately before s
 
 ### Explicitly defer
 
-- Full video editing or automatic rendered rough-cut export.
+- General-purpose manual nonlinear editing, multicam workflows, or frame-by-frame effects.
 - Multi-user accounts and billing.
 - Catalog-wide background synchronization.
 - Gemini TTS and narration.

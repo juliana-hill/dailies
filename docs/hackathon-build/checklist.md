@@ -2,7 +2,7 @@
 
 > Working scaffold. Lock this checklist after scope, PRD, and technical specification review.
 
-- [ ] **1. Repository and compliance foundation**
+- [x] **1. Repository and compliance foundation**
   Spec ref: `spec.md > Architecture`
   What to build: Add license, README, environment templates, dependency policy, and base folders.
   Acceptance: A fresh clone has documented setup and no committed secrets.

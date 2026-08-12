@@ -54,8 +54,21 @@ As a creator, I want one specific next-cut recommendation so that I know what to
 - It separates observed evidence from inferred cause.
 - It references the relevant retention position and edit/music event when available.
 
+## Epic 6: Produce the enhanced final cut
+
+As a creator, I want Dailies to apply its analysis, retention insight, and custom soundtrack so that I receive a ready-to-review final cut rather than recommendations alone.
+
+### Acceptance criteria
+
+- The visible Gemini analysis is preserved after rendering.
+- A timestamped edit plan states what Dailies kept, tightened, or removed and why.
+- The Lyria soundtrack is mixed into the retained timeline without obscuring dialogue.
+- The UI shows distinct editing and rendering progress.
+- The completed project includes controlled playback and download of the rendered MP4.
+- The original rough cut remains distinguishable from the enhanced final cut.
+
 ## Non-goals
 
-- Dailies will not be a full nonlinear editor in the MVP.
+- Dailies will not expose a general-purpose manual nonlinear-editing timeline in the MVP.
 - Dailies will not promise causal proof from retention correlations.
 - Dailies will not expose secrets or private analytics data in the browser.

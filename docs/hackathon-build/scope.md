@@ -4,7 +4,7 @@
 
 ## Product
 
-Dailies is a GurlZine family product for YouTube creators. It analyzes a new video, generates a soundtrack brief and clip, and uses the creator’s historical retention data to explain one concrete improvement for the next edit.
+Dailies is a GurlZine family product for YouTube creators. It analyzes a new video, uses the creator’s historical retention data to derive concrete edit decisions, generates a custom soundtrack, and renders an enhanced final cut while preserving a visible explanation of what it changed.
 
 ## User
 
@@ -21,10 +21,12 @@ The primary user is an independent YouTube creator or small creator team who edi
 3. Receive and play a short Lyria-generated instrumental score.
 4. See a ClickHouse MCP-backed retention insight using recent creator videos.
 5. Receive one evidence-backed recommendation with timestamps and supporting videos.
+6. Review the timestamped edit plan generated from the analysis and recommendation.
+7. Play and download the enhanced final cut with its custom soundtrack applied.
 
 ## What is explicitly out of scope for the first build
 
-- Full editing or rendered rough-cut export.
+- Manual nonlinear-editor features such as arbitrary timeline manipulation, multicam editing, and frame-by-frame effects.
 - Multi-user accounts and billing.
 - Mobile apps.
 - TTS/narration.

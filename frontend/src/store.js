@@ -1,101 +1,36 @@
 import { configureStore, createAsyncThunk, createSlice } from '@reduxjs/toolkit';
-import { demoAnalysis, demoCreator, demoInsight, demoProject } from './fixtures';
+import { api, readVideoDuration } from './api';
 
-const wait = (milliseconds) => new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+const errorPayload = (error) => ({ message: error.message || 'Request failed.', code: error.code || 'CLIENT_ERROR', retryable: Boolean(error.retryable) });
+export const loadSession = createAsyncThunk('auth/loadSession', async (_, { rejectWithValue }) => { try { return await api.me(); } catch (error) { return rejectWithValue(errorPayload(error)); } });
+export const submitProject = createAsyncThunk('project/submit', async ({ file, outline }, { rejectWithValue }) => { try {
+  if (!file) throw new Error('Choose a video before starting analysis.'); const durationSeconds = await readVideoDuration(file);
+  const created = await api.createProject({ title: file.name.replace(/\.[^/.]+$/, ''), outline, fileName: file.name, mimeType: file.type, fileSizeBytes: file.size, durationSeconds });
+  await api.upload(created.uploadTarget, file, durationSeconds); return await api.analyze(created.project.projectId);
+} catch (error) { return rejectWithValue(errorPayload(error)); } });
+export const fetchProject = createAsyncThunk('project/fetch', async (id, { rejectWithValue }) => { try { return await api.project(id); } catch (error) { return rejectWithValue(errorPayload(error)); } });
+export const retryProject = createAsyncThunk('project/retry', async (id, { rejectWithValue }) => { try { return await api.analyze(id); } catch (error) { return rejectWithValue(errorPayload(error)); } });
+export const openProject = createAsyncThunk('project/open', async (id, { rejectWithValue }) => { try { return await api.project(id); } catch (error) { return rejectWithValue(errorPayload(error)); } });
 
-export const runDemoProject = createAsyncThunk('project/runDemoProject', async (payload = {}) => {
-  const fileName = payload.file?.name || 'Studio-visit-rough-cut.mp4';
-  await wait(520);
-  return { fileName, outline: payload.outline || 'A small studio visit that moves from arrival to a decisive reveal.' };
-});
+const projectInitial = { id: null, status: 'idle', fileName: '', outline: '', processingStage: 0, error: null, errorCode: null, retryable: false, report: null, uploadAssetId: null, fixtureMode: false };
+const stageFor = { created: 0, uploading: 0, uploaded: 1, analyzing: 1, scoring: 2, querying_insights: 3, waiting_for_service: 3, editing: 4, rendering: 5, complete: 6, failed: 0 };
+const assignProject = (state, project) => { state.id = project.projectId; state.status = project.status; state.fileName = project.fileName; state.outline = project.outline; state.processingStage = stageFor[project.status] ?? 0; state.error = project.error || null; state.report = project.report || null; state.progress = project.progress || null; state.uploadAssetId = project.uploadAssetId || null; state.fixtureMode = project.fixtureMode; };
+const projectSlice = createSlice({ name: 'project', initialState: projectInitial, reducers: { projectReset: () => projectInitial, projectFailed: (state, action) => { state.status = 'failed'; state.error = action.payload; }, }, extraReducers: (builder) => builder
+  .addCase(submitProject.pending, (state, action) => { state.status = 'uploading'; state.fileName = action.meta.arg.file?.name || ''; state.outline = action.meta.arg.outline || ''; state.error = null; })
+  .addCase(submitProject.fulfilled, (state, action) => assignProject(state, action.payload))
+  .addCase(submitProject.rejected, (state, action) => { state.status = 'failed'; state.error = action.payload?.message || action.error.message; state.errorCode = action.payload?.code; state.retryable = action.payload?.retryable; })
+  .addCase(fetchProject.fulfilled, (state, action) => assignProject(state, action.payload))
+  .addCase(fetchProject.rejected, (state, action) => { state.status = 'failed'; state.error = action.payload?.message || action.error.message; state.retryable = action.payload?.retryable; })
+  .addCase(retryProject.pending, (state) => { state.status = 'analyzing'; state.error = null; state.retryable = false; })
+  .addCase(retryProject.fulfilled, (state, action) => assignProject(state, action.payload))
+  .addCase(retryProject.rejected, (state, action) => { state.status = 'failed'; state.error = action.payload?.message || action.error.message; state.retryable = action.payload?.retryable; })
+  .addCase(openProject.fulfilled, (state, action) => assignProject(state, action.payload)) });
 
-const projectSlice = createSlice({
-  name: 'project',
-  initialState: {
-    id: null,
-    status: 'idle',
-    fileName: '',
-    outline: '',
-    processingStage: 0,
-    error: null,
-  },
-  reducers: {
-    projectStageChanged: (state, action) => { state.processingStage = action.payload; },
-    projectCompleted: (state) => { state.status = 'complete'; state.processingStage = 4; },
-    projectDemoLoaded: (state) => Object.assign(state, { id: demoProject.id, status: 'complete', fileName: 'Studio-visit-rough-cut.mp4', outline: 'A small studio visit that moves from arrival to a decisive reveal.', processingStage: 4, error: null }),
-    projectFailed: (state, action) => { state.status = 'failed'; state.error = action.payload; },
-    projectReset: (state) => Object.assign(state, { id: null, status: 'idle', fileName: '', outline: '', processingStage: 0, error: null }),
-  },
-  extraReducers: (builder) => {
-    builder
-      .addCase(runDemoProject.pending, (state, action) => {
-        state.id = demoProject.id;
-        state.status = 'uploading';
-        state.fileName = action.meta.arg?.file?.name || 'Studio-visit-rough-cut.mp4';
-        state.outline = action.meta.arg?.outline || '';
-        state.processingStage = 0;
-        state.error = null;
-      })
-      .addCase(runDemoProject.fulfilled, (state, action) => {
-        state.status = 'processing';
-        state.fileName = action.payload.fileName;
-        state.outline = action.payload.outline;
-        state.processingStage = 1;
-      });
-  },
-});
-
-const analysisSlice = createSlice({
-  name: 'analysis',
-  initialState: { result: null, status: 'idle', error: null, selectedSceneId: 'scene-1' },
-  reducers: {
-    analysisLoaded: (state) => { state.result = demoAnalysis; state.status = 'complete'; state.error = null; },
-    analysisSceneSelected: (state, action) => { state.selectedSceneId = action.payload; },
-    analysisReset: (state) => Object.assign(state, { result: null, status: 'idle', error: null, selectedSceneId: 'scene-1' }),
-  },
-});
-
-const insightSlice = createSlice({
-  name: 'insight',
-  initialState: { result: null, status: 'idle', error: null },
-  reducers: {
-    insightLoaded: (state) => { state.result = demoInsight; state.status = 'complete'; state.error = null; },
-    insightReset: (state) => Object.assign(state, { result: null, status: 'idle', error: null }),
-  },
-});
-
-const authSlice = createSlice({
-  name: 'auth',
-  initialState: { status: 'unauthenticated', user: null },
-  reducers: {
-    demoSignedIn: (state, action) => { state.status = 'authenticated'; state.user = { ...demoCreator, ...(action.payload || {}) }; },
-    signedOut: (state) => { state.status = 'unauthenticated'; state.user = null; },
-  },
-});
-
-const queryAuthMode = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('auth') === 'sign-up' ? 'sign-up' : 'sign-in';
-
-const uiSlice = createSlice({
-  name: 'ui',
-  initialState: { activeStep: 'project', isDemo: true, evidenceOpen: false, view: 'auth', authMode: queryAuthMode },
-  reducers: {
-    activeStepChanged: (state, action) => { state.activeStep = action.payload; },
-    evidenceToggled: (state) => { state.evidenceOpen = !state.evidenceOpen; },
-    viewChanged: (state, action) => { state.view = action.payload; },
-    authModeChanged: (state, action) => { state.authMode = action.payload; },
-    uiReset: (state) => Object.assign(state, { activeStep: 'project', isDemo: true, evidenceOpen: false, view: 'dashboard', authMode: 'sign-in' }),
-  },
-});
-
-export const { projectStageChanged, projectCompleted, projectDemoLoaded, projectFailed, projectReset } = projectSlice.actions;
-export const { analysisLoaded, analysisSceneSelected, analysisReset } = analysisSlice.actions;
-export const { insightLoaded, insightReset } = insightSlice.actions;
-export const { demoSignedIn, signedOut } = authSlice.actions;
-export const { activeStepChanged, authModeChanged, evidenceToggled, uiReset, viewChanged } = uiSlice.actions;
-
-export const store = configureStore({
-  reducer: { project: projectSlice.reducer, analysis: analysisSlice.reducer, insight: insightSlice.reducer, auth: authSlice.reducer, ui: uiSlice.reducer },
-});
-
-/** @type {(state: ReturnType<typeof store.getState>) => ReturnType<typeof store.getState>} */
+const projectResultActions = [fetchProject.fulfilled.type, retryProject.fulfilled.type, openProject.fulfilled.type];
+const analysisSlice = createSlice({ name: 'analysis', initialState: { result: null, status: 'idle', selectedSceneId: null }, reducers: { analysisSceneSelected: (state, action) => { state.selectedSceneId = action.payload; }, analysisReset: (state) => { state.result = null; state.status = 'idle'; state.selectedSceneId = null; } }, extraReducers: (builder) => builder.addCase(submitProject.fulfilled, (state) => { state.status = 'loading'; }).addMatcher((action) => projectResultActions.includes(action.type), (state, action) => { const analysis = action.payload.report?.analysis || action.payload.progress?.analysis; if (analysis) { state.result = analysis; state.status = 'complete'; state.selectedSceneId ||= analysis.scenes[0]?.id; } }) });
+const insightSlice = createSlice({ name: 'insight', initialState: { result: null, status: 'idle' }, reducers: { insightReset: (state) => { state.result = null; state.status = 'idle'; } }, extraReducers: (builder) => builder.addCase(submitProject.fulfilled, (state) => { state.status = 'loading'; }).addMatcher((action) => projectResultActions.includes(action.type), (state, action) => { const recommendation = action.payload.report?.recommendation || action.payload.progress?.recommendation; if (recommendation) { state.result = recommendation; state.status = 'complete'; } }) });
+const authSlice = createSlice({ name: 'auth', initialState: { status: 'loading', user: null, projects: [], error: null }, reducers: { signedOut: (state) => { state.status = 'unauthenticated'; state.user = null; } }, extraReducers: (builder) => builder.addCase(loadSession.fulfilled, (state, action) => { state.status = 'authenticated'; state.user = action.payload.user; state.projects = action.payload.projects; state.fixtureMode = action.payload.fixtureMode; state.error = null; }).addCase(loadSession.rejected, (state, action) => { state.status = 'unauthenticated'; state.error = action.payload?.message || action.error.message; }) });
+const uiSlice = createSlice({ name: 'ui', initialState: { activeStep: 'project', evidenceOpen: false, view: 'dashboard' }, reducers: { activeStepChanged: (s, a) => { s.activeStep = a.payload; }, evidenceToggled: (s) => { s.evidenceOpen = !s.evidenceOpen; }, viewChanged: (s, a) => { s.view = a.payload; }, uiReset: (s) => { s.activeStep = 'project'; s.evidenceOpen = false; s.view = 'dashboard'; } } });
+export const { projectFailed, projectReset } = projectSlice.actions; export const { analysisSceneSelected, analysisReset } = analysisSlice.actions; export const { insightReset } = insightSlice.actions; export const { signedOut } = authSlice.actions; export const { activeStepChanged, evidenceToggled, uiReset, viewChanged } = uiSlice.actions;
+export const store = configureStore({ reducer: { project: projectSlice.reducer, analysis: analysisSlice.reducer, insight: insightSlice.reducer, auth: authSlice.reducer, ui: uiSlice.reducer } });
 export const selectState = (state) => state;

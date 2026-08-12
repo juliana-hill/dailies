@@ -1,0 +1,5 @@
+import { timingSafeEqual } from 'node:crypto'; import express from 'express'; import { readCreatorRetention } from './youtubeAnalytics.js'; import { writeRetention } from './clickhouseWriter.js';
+export const app = express(); app.use(express.json());
+app.get('/health', (_req, res) => res.json({ ok: true, service: 'dailies-ingestion', fixtureMode: false }));
+app.post('/sync', async (req, res) => { const expected = process.env.INGESTION_SERVICE_TOKEN; if (expected) { const actual = req.header('authorization')?.replace(/^Bearer /, '') || ''; const a = Buffer.from(actual), b = Buffer.from(expected); if (a.length !== b.length || !timingSafeEqual(a, b)) return res.status(401).json({ error: 'Unauthorized' }); } try { const creator = await readCreatorRetention(); const result = await writeRetention(creator.videos); res.json({ channelId: creator.channelId, ...result }); } catch (error: any) { res.status(502).json({ error: { code: 'SYNC_FAILED', message: String(error?.message || error).slice(0, 500), retryable: true } }); } });
+if (process.env.NODE_ENV !== 'test') app.listen(Number(process.env.PORT || 8080), () => console.log('Dailies ingestion service listening'));

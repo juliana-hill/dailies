@@ -1,0 +1,2 @@
+import { describe, expect, it } from 'vitest'; import { normalizeRetention } from './youtubeAnalytics.js';
+describe('YouTube retention normalization', () => { it('preserves ratios and derives seconds', () => { const points = normalizeRetention('v', 120, [[.01, 1], [.42, .62], [1, .2]]); expect(points[1]).toMatchObject({ position_ratio: .42, position_seconds: 50.4, audience_watch_ratio: .62 }); }); it('rejects invalid ratios', () => expect(() => normalizeRetention('v', 100, [[1.2, .5]])).toThrow()); });

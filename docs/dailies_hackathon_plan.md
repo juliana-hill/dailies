@@ -15,7 +15,8 @@
 2. Gemini multimodal analysis transcribes and tags scene-level moments, pacing issues, dead air
 3. Lyria 3 generates a custom soundtrack matched to the edit's emotional arc (no copyright-strike risk — freshly generated, not licensed stock)
 4. ClickHouse stores the creator's historical retention-curve data (from their own YouTube Analytics export); the agent queries this to correlate past cut/music choices with viewer drop-off points
-5. Agent produces a rough-cut recommendation ("sustain the score through 0:40-0:55 — your last 3 videos lost ~40% of viewers exactly there when the music cut out")
+5. Agent produces a rough-cut recommendation and a timestamped edit-decision list ("sustain the score through 0:40-0:55 — your last 3 videos lost ~40% of viewers exactly there when the music cut out")
+6. The editing pipeline applies those decisions and the custom score to render an enhanced final cut; the UI preserves the original analysis and explains every applied change
 
 **Why this wins on the rubric:**
 - **Technological Implementation** — real, non-decorative use of Gemini multimodal, Lyria 3, ADK orchestration, and ClickHouse MCP queries — every piece does real work
@@ -39,7 +40,7 @@ Source of truth: https://agentic-cinema.devpost.com/rules and https://agentic-ci
 | New project only | Confirm this is not a reuse of Juliluna Yoga or Couchbumming |
 | Public open-source repo w/ detectable license | MIT or Apache-2.0, license file at repo root |
 | Hosted, functional project URL | Deploy via Cloud Run |
-| Repo demonstrates Google Cloud + ClickHouse actually imported/called at runtime | `google-adk`, `google-genai`, or `google-cloud-aiplatform` imported in the agent code; `mcp-clickhouse` connection instantiated in a real tool call, not just config |
+| Repo demonstrates Google Cloud + ClickHouse actually imported/called at runtime | `@google/genai` imported in the Node.js agent service; the official ClickHouse MCP endpoint is invoked through the TypeScript MCP SDK, not just named in config |
 | Demo video ≤ 3 min, public on YouTube/Vimeo, English | Script in §9 |
 | Deadline | **September 7, 2026, 2:00 PM PT** |
 | Prize (ClickHouse track) | 1st $7,500 (+ social promo opportunity), 2nd $3,000, 3rd $2,000 ([official rules](https://agentic-cinema.devpost.com/rules)) |
@@ -195,6 +196,14 @@ LIMIT 10;
 4. Call Gemini to turn the raw correlation into a natural-language recommendation
 5. Write result to `recommendations`, surface it in the UI alongside the new soundtrack
 
+### 6.4 Editing and Render Pipeline
+1. Convert the visible Gemini analysis and retention recommendation into a schema-validated edit-decision list
+2. Preserve dialogue and intentional story beats while trimming flagged dead air and low-value pauses
+3. Apply the Lyria soundtrack across the retained timeline with dialogue-aware gain instructions
+4. Submit the source footage, soundtrack, and edit list to Google Cloud Transcoder API from the Node.js service
+5. Store the rendered MP4 in Cloud Storage and return a controlled playback/download URL
+6. Keep the original analysis visible beside an explicit “what changed” summary and the enhanced final cut
+
 ---
 
 ## 7. Repo Structure
@@ -208,12 +217,13 @@ dailies/
 │   ├── clickhouse/schema.sql
 │   └── cloudrun/service.yaml
 ├── agents/
-│   ├── orchestrator.py        # ADK root agent
-│   ├── analysis_agent.py      # Gemini multimodal tool calls
-│   ├── score_agent.py         # Lyria 3 tool calls
-│   └── retention_agent.py     # ClickHouse MCP tool calls
+│   └── src/
+│       ├── orchestrator.ts        # workflow coordinator
+│       ├── analysisAgent.ts       # Gemini multimodal tool calls
+│       ├── scoreAgent.ts          # Lyria 3 tool calls
+│       └── retentionAgent.ts      # ClickHouse MCP tool calls
 ├── ingestion/
-│   └── youtube_analytics_sync.py   # pulls retention data via YouTube Analytics API (OAuth)
+│   └── src/youtubeAnalytics.ts     # pulls retention data via YouTube Analytics API (OAuth)
 ├── frontend/                   # web app: upload, soundtrack preview, recommendation display
 └── tests/
 ```
