@@ -1,0 +1,19 @@
+{
+  "name": "dailies",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "frontend",
+    "api",
+    "shared"
+  ],
+  "scripts": {
+    "dev:frontend": "npm --workspace frontend run dev",
+    "dev:api": "npm --workspace api run dev",
+    "build": "npm run build --workspaces",
+    "test": "npm run test --workspaces"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

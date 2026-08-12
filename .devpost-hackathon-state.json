@@ -1,0 +1,19 @@
+{
+  "event": {
+    "name": "Agentic Cinema: The Blockbuster Hackathon",
+    "partner_track": "ClickHouse",
+    "deadline": "2026-09-07T14:00:00-07:00"
+  },
+  "project": {
+    "name": "Dailies",
+    "summary": "An agentic post-production assistant that connects video analysis, generated score, and creator retention data.",
+    "platform": "web"
+  },
+  "learning": {
+    "status": "active",
+    "current_step": "scope",
+    "completed_steps": [],
+    "plan_file": "docs/hackathon-build/scope.md",
+    "next_command": "build-scope"
+  }
+}
