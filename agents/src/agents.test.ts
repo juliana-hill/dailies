@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest'; import { PNG } from 'pngjs'; import { extractAudio, extractImage, hasTransparentBackground, isContentBlocked, selectLyriaModel } from './scoreAgent.js'; import { buildCorrelationQuery, queryRetention, recommendationFromRows, rowsFromMcpText } from './retentionAgent.js';
+import { describe, expect, it } from 'vitest'; import { PNG } from 'pngjs'; import { extractAudio, extractImage, hasTransparentBackground, isContentBlocked, selectLyriaModel, selectReelModel, validateCompositionBrief, validateReelIndex } from './scoreAgent.js'; import { buildCorrelationQuery, queryRetention, recommendationFromRows, rowsFromMcpText } from './retentionAgent.js';
+import { shouldFallbackFromLyria, soundtrackLengthRange } from './soundtrackProviders.js';
 import { isQuotaLimited, isRetryable } from './server.js';
 import { editPlanSchema } from '@dailies/shared';
 import { buildFilterComplex, requiresFfmpeg } from './ffmpegRenderer.js';
@@ -14,6 +15,35 @@ describe('agent integrations', () => {
     expect(selectLyriaModel({ ...cue, type: 'music' })).toBe('lyria-3-clip-preview');
     expect(selectLyriaModel({ ...cue, type: 'pop' })).toBe('lyria-3-clip-preview');
     expect(selectLyriaModel({ ...cue, endSeconds: 31, type: 'music' })).toBe('lyria-3-pro-preview');
+  });
+  it('selects one Lyria model for the combined soundtrack duration', () => {
+    expect(selectReelModel([{ startSeconds: 0, endSeconds: 3 }, { startSeconds: 5, endSeconds: 7 }] as any)).toBe('lyria-3-clip-preview');
+    expect(selectReelModel([{ startSeconds: 0, endSeconds: 20 }, { startSeconds: 30, endSeconds: 45 }] as any)).toBe('lyria-3-pro-preview');
+  });
+  it('opens the Treblo circuit breaker only for transient Lyria failures', () => {
+    expect(shouldFallbackFromLyria(429)).toBe(true);
+    expect(shouldFallbackFromLyria(503)).toBe(true);
+    expect(shouldFallbackFromLyria(400)).toBe(false);
+    expect(shouldFallbackFromLyria(401)).toBe(false);
+  });
+  it('requests one bounded Treblo soundtrack long enough for all cue sections', () => {
+    expect(soundtrackLengthRange([{ startSeconds: 0, endSeconds: 4 }, { startSeconds: 10, endSeconds: 16 }] as any)).toEqual([0, 30]);
+    expect(soundtrackLengthRange([{ startSeconds: 0, endSeconds: 75 }, { startSeconds: 80, endSeconds: 150 }] as any)).toEqual([120, 150]);
+    expect(soundtrackLengthRange([{ startSeconds: 0, endSeconds: 600 }] as any)).toEqual([270, 300]);
+  });
+  it('rejects a Gemini soundtrack index that exceeds the measured audio or changes cue order', () => {
+    const cues = [{ id: 'intro' }, { id: 'outro' }] as any;
+    expect(validateReelIndex({ cues: [{ id: 'intro', startSeconds: 0, endSeconds: 4 }, { id: 'outro', startSeconds: 4, endSeconds: 8 }] }, cues, 8)?.size).toBe(2);
+    expect(validateReelIndex({ cues: [{ id: 'intro', startSeconds: 0, endSeconds: 4 }, { id: 'outro', startSeconds: 4, endSeconds: 9 }] }, cues, 8)).toBeUndefined();
+    expect(validateReelIndex({ cues: [{ id: 'outro', startSeconds: 0, endSeconds: 4 }, { id: 'intro', startSeconds: 4, endSeconds: 8 }] }, cues, 8)).toBeUndefined();
+    expect(validateReelIndex({ cues: [{ id: 'intro', startSeconds: 0, endSeconds: 5 }, { id: 'outro', startSeconds: 4, endSeconds: 8 }] }, cues, 8)).toBeUndefined();
+  });
+  it('requires every composition cue exactly once and in the diagnosed order', () => {
+    const cues = [{ id: 'intro' }, { id: 'reveal' }, { id: 'outro' }] as any;
+    expect(validateCompositionBrief({ sections: [{ cueId: 'intro' }, { cueId: 'reveal' }, { cueId: 'outro' }] }, cues).valid).toBe(true);
+    expect(validateCompositionBrief({ sections: [{ cueId: 'intro' }, { cueId: 'outro' }] }, cues)).toEqual({ valid: false, missingIds: ['reveal'] });
+    expect(validateCompositionBrief({ sections: [{ cueId: 'reveal' }, { cueId: 'intro' }, { cueId: 'outro' }] }, cues).valid).toBe(false);
+    expect(validateCompositionBrief({ sections: [{ cueId: 'intro' }, { cueId: 'reveal' }, { cueId: 'reveal' }] }, cues)).toEqual({ valid: false, missingIds: ['outro'] });
   });
   it('handles Gemini Image output', () => expect(extractImage({ candidates: [{ content: { parts: [{ inlineData: { data: Buffer.from('image').toString('base64'), mimeType: 'image/png' } }] } }] }).bytes.toString()).toBe('image'));
   it('accepts genuine PNG alpha transparency and rejects opaque checkerboard-capable pixels', () => {
@@ -59,7 +89,7 @@ describe('agent integrations', () => {
     expect(built.filter).toContain('afftdn=nr=10:nf=-35');
     expect(built.filter).toContain('equalizer=f=60');
     expect(built.filter).toContain('eq=brightness=0.05:contrast=1.1:saturation=1.08');
-    expect(built.filter).toContain('[1:a]atrim=0:4');
+    expect(built.filter).toContain('[1:a]atrim=start=0:end=4');
     expect(built.filter).toContain('adelay=5000:all=1');
     expect(built.filter).not.toContain('loudnorm=');
     expect(built.filter).toContain('alimiter=limit=0.95');
@@ -111,7 +141,7 @@ describe('agent integrations', () => {
     expect(built.filter).not.toContain('drawtext=');
     expect(built.filter).not.toContain('drawbox=');
     expect(built.filter).not.toContain('sine=frequency');
-    expect(built.filter).toContain('[1:a]atrim=0:1');
+    expect(built.filter).toContain('[1:a]atrim=start=0:end=1');
     expect(built.filter).not.toContain('volume=0.32');
     expect(built.filter).not.toContain('dialogueduck');
     expect(built.filter).toContain('normalize=0');
@@ -124,13 +154,21 @@ describe('agent integrations', () => {
     const built = buildFilterComplex(plan, [generated], [editorial]);
     expect(built.filter).toContain('[2:v][vjoined]scale2ref=w=main_w:h=main_h');
     expect(built.filter).toContain("[dialoguebase]volume='if(gt(between(t,0,2.5),0),0,1)':eval=frame[dialogue]");
-    expect(built.filter).toContain('[1:a]atrim=0:2.5');
+    expect(built.filter).toContain('[1:a]atrim=start=0:end=2.5');
     expect(built.filter).not.toContain('volume=0.32');
+  });
+
+  it('slices a Gemini-indexed effect from inside a consolidated Lyria soundtrack', () => {
+    const plan = editPlanSchema.parse({ projectId: 'project-1', rationale: 'Place the organic accent at the reveal.', segments: [{ id: 'all', sourceStartSeconds: 0, sourceEndSeconds: 8, action: 'keep', reason: 'Preserve dialogue.' }] });
+    const cue = { id: 'bubble', startSeconds: 2, endSeconds: 3.5, type: 'pop' as const, purpose: 'organic reveal accent', mood: 'friendly', energy: .6, gainDb: -3, fadeInSeconds: 0, fadeOutSeconds: .2, dialoguePolicy: 'no_dialogue' as const, visualCompanion: '', asset: { id: 'shared-reel', kind: 'soundtrack' as const, fileName: 'organic-editorial-soundtrack.wav', mimeType: 'audio/wav', createdAt: new Date().toISOString() }, durationSeconds: 1.5, sourceStartSeconds: 8.25, sourceEndSeconds: 9.75, prompt: 'Organic found-sound soundtrack.' };
+    const built = buildFilterComplex(plan, [cue]);
+    expect(built.filter).toContain('[1:a]atrim=start=8.25:end=9.75');
+    expect(built.filter).toContain('adelay=2000:all=1');
   });
 
   it('rejects a visual effect without its Lyria-generated audio asset', () => {
     const plan = editPlanSchema.parse({ projectId: 'project-1', rationale: 'Reveal.', segments: [{ id: 'reveal', sourceStartSeconds: 0, sourceEndSeconds: 8, action: 'keep', reason: 'Feature reveal.' }] });
-    expect(() => buildFilterComplex(plan, [], [{ id: 'missing', startSeconds: 2, endSeconds: 3, type: 'pop', purpose: 'feature reveal', mood: 'warm', energy: .6, gainDb: -3, fadeInSeconds: 0, fadeOutSeconds: .2, dialoguePolicy: 'duck_under_dialogue', visualCompanion: 'feature' }])).toThrow('requires its Lyria-generated audio asset');
+    expect(() => buildFilterComplex(plan, [], [{ id: 'missing', startSeconds: 2, endSeconds: 3, type: 'pop', purpose: 'feature reveal', mood: 'warm', energy: .6, gainDb: -3, fadeInSeconds: 0, fadeOutSeconds: .2, dialoguePolicy: 'duck_under_dialogue', visualCompanion: 'feature' }])).toThrow('requires its generated audio asset');
   });
 
   it('rejects a visual effect without its Gemini-generated image asset', () => {

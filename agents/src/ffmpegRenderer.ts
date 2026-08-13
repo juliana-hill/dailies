@@ -46,7 +46,7 @@ export function buildFilterComplex(plan: EditPlan, cues: MusicCue[] = [], editor
   const mappedEditorialCues = editorialCues.map((cue) => ({ cue, mapped: mapCue(cue, segments) })).filter((value) => value.mapped);
   const effects = mappedEditorialCues.filter(({ cue }) => cue.type !== 'silence' && Boolean(cue.visualGenerationPrompt?.trim() || cue.visualCompanion?.trim())).slice(0, 8);
   const missingAudio = effects.find(({ cue }) => !generatedCues.has(cue.id));
-  if (missingAudio) throw new Error(`Visual cue ${missingAudio.cue.id} requires its Lyria-generated audio asset`);
+  if (missingAudio) throw new Error(`Visual cue ${missingAudio.cue.id} requires its generated audio asset`);
   const missingVisual = effects.find(({ cue }) => !generatedCues.get(cue.id)?.visualAsset);
   if (missingVisual) throw new Error(`Visual cue ${missingVisual.cue.id} requires its Gemini-generated image asset`);
   let videoLabel = 'vjoined';
@@ -74,7 +74,8 @@ export function buildFilterComplex(plan: EditPlan, cues: MusicCue[] = [], editor
   } else filters.push('[dialoguebase]anull[dialogue]');
   mappedCues.forEach(({ cue, index, mapped }) => {
     const duration = mapped!.end - mapped!.start; const fadeIn = Math.min(cue.fadeInSeconds, duration / 2); const fadeOut = Math.min(cue.fadeOutSeconds, duration / 2);
-    filters.push(`[${index + 1}:a]atrim=0:${number(duration)},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=${number(fadeIn)},afade=t=out:st=${number(Math.max(0, duration - fadeOut))}:d=${number(fadeOut)},volume=${number(dbFactor(cue.gainDb))},adelay=${Math.round(mapped!.start * 1000)}:all=1,apad,atrim=0:${number(outputCursor)},aformat=sample_rates=48000:channel_layouts=stereo[music${index}]`);
+    const reelStart = cue.sourceStartSeconds || 0; const reelEnd = cue.sourceEndSeconds || reelStart + duration;
+    filters.push(`[${index + 1}:a]atrim=start=${number(reelStart)}:end=${number(Math.min(reelEnd, reelStart + duration))},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=${number(fadeIn)},afade=t=out:st=${number(Math.max(0, duration - fadeOut))}:d=${number(fadeOut)},volume=${number(dbFactor(cue.gainDb))},adelay=${Math.round(mapped!.start * 1000)}:all=1,apad,atrim=0:${number(outputCursor)},aformat=sample_rates=48000:channel_layouts=stereo[music${index}]`);
   });
   const additions = mappedCues.map(({ index }) => `[music${index}]`);
   if (additions.length) filters.push(`[dialogue]${additions.join('')}amix=inputs=${additions.length + 1}:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.95:attack=5:release=50,aresample=48000,aformat=sample_rates=48000:channel_layouts=stereo[aout]`);

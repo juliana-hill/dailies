@@ -95,10 +95,15 @@ export const assetSchema = z.object({
 });
 export type Asset = z.infer<typeof assetSchema>;
 
-export const generatedMusicCueSchema = editorialAudioCueSchema.and(z.object({ type: z.enum(['music', 'laugh_track', 'pop', 'sting']), asset: assetSchema, visualAsset: assetSchema.optional(), durationSeconds: z.number().positive(), prompt: z.string().min(1), visualPrompt: z.string().optional() }));
+export const generatedMusicCueSchema = editorialAudioCueSchema.and(z.object({
+  type: z.enum(['music', 'laugh_track', 'pop', 'sting']), asset: assetSchema, visualAsset: assetSchema.optional(),
+  durationSeconds: z.number().positive(), prompt: z.string().min(1), visualPrompt: z.string().optional(),
+  sourceStartSeconds: z.number().nonnegative().optional(), sourceEndSeconds: z.number().positive().optional(),
+})).refine((value) => value.sourceStartSeconds === undefined || value.sourceEndSeconds === undefined || value.sourceEndSeconds > value.sourceStartSeconds, { message: 'Sound reel slice end must follow its start' });
 export const soundtrackResultSchema = z.object({
   needed: z.boolean().default(true), rationale: z.string().default('Legacy continuous soundtrack.'), cues: z.array(generatedMusicCueSchema).default([]), model: z.string().min(1),
   asset: assetSchema.optional(), durationSeconds: z.number().positive().optional(), prompt: z.string().optional(),
+  provider: z.enum(['lyria', 'treblo']).optional(), providerJobId: z.string().min(1).optional(), compositionBrief: z.string().min(1).optional(),
 });
 export type SoundtrackResult = z.infer<typeof soundtrackResultSchema>;
 

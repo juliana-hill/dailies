@@ -53,7 +53,7 @@ export async function runEditorialAgent(input: JobInput, update: (state: JobStat
     return { ok: true, revisedFromDraft: Boolean(revision), targetDurationSeconds: editPlan.targetDurationSeconds, segments: editPlan.segments.length, rationale: editPlan.rationale };
   }});
 
-  const assets = new FunctionTool({ name: 'generate_editorial_assets', description: 'Generate the analysis-grounded Lyria music/sound assets and Gemini visual assets. This does not invent a continuous background soundtrack.', parameters: reasonSchema, execute: async (_reason, toolContext) => {
+  const assets = new FunctionTool({ name: 'generate_editorial_assets', description: 'Have Gemini direct one analysis-grounded soundtrack containing the required music/sound moments, generate it with Lyria or the Treblo circuit-breaker fallback, listen to and index its usable ranges, and generate paired Gemini visual assets. This does not invent a continuous background bed.', parameters: reasonSchema, execute: async (_reason, toolContext) => {
     if (!progress.analysis) return { ok: false, requiredNext: 'diagnose_source_video' };
     if (progress.soundtrack) return { ok: true, reusedDurableAssets: true, needed: progress.soundtrack.needed, generatedCues: progress.soundtrack.cues.length, rationale: progress.soundtrack.rationale };
     if (fatalToolError) { toolContext!.invocationContext.endInvocation = true; return { ok: false, fatal: true, error: String((fatalToolError as any)?.message || fatalToolError).slice(0, 500) }; }

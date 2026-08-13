@@ -6,3 +6,4 @@ agents/dist/
 ingestion/dist/
 *.log
 .DS_Store
+.env.local

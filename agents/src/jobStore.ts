@@ -28,7 +28,7 @@ export type PipelineEvent = {
 
 const statusMessage: Record<ProjectStatus, string> = {
   created: 'Project created', uploading: 'Uploading footage', uploaded: 'Footage uploaded', analyzing: 'Gemini is analyzing the footage',
-  scoring: 'Lyria is generating the score', querying_insights: 'Querying creator retention through ClickHouse MCP', editing: 'Building the enhanced edit timeline',
+  scoring: 'Gemini is directing the consolidated soundtrack', querying_insights: 'Querying creator retention through ClickHouse MCP', editing: 'Building the enhanced edit timeline',
   rendering: 'Rendering the enhanced final cut', waiting_for_service: 'Waiting for ClickHouse MCP configuration', complete: 'Final cut and report ready', failed: 'Processing failed',
 };
 const activeStatuses = ['queued', 'analyzing', 'scoring', 'querying_insights', 'editing', 'rendering'];
