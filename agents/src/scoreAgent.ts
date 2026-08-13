@@ -50,7 +50,7 @@ export function isImageCapacityError(error: unknown): boolean {
 }
 async function requestImagen(project: string, headers: Record<string, string>, prompt: string, needsAlpha: boolean) {
   const configuredModel = process.env.IMAGEN_MODEL || 'imagen-4.0-generate-001';
-  const models = [...new Set([configuredModel, 'imagen-3.0-generate-002', 'imagen-3.0-generate-001'])];
+  const models = [...new Set([configuredModel, 'imagen-4.0-fast-generate-001', 'imagen-4.0-ultra-generate-001', 'imagen-3.0-generate-002', 'imagen-3.0-generate-001'])];
   const locations = [...new Set([process.env.IMAGEN_LOCATION || 'us-central1', 'global'])];
   let lastError = 'Imagen fallback was unavailable';
   for (const location of locations) for (const model of models) {
