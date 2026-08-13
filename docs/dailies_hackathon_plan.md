@@ -40,7 +40,7 @@ Source of truth: https://agentic-cinema.devpost.com/rules and https://agentic-ci
 | New project only | Confirm this is not a reuse of Juliluna Yoga or Couchbumming |
 | Public open-source repo w/ detectable license | MIT or Apache-2.0, license file at repo root |
 | Hosted, functional project URL | Deploy via Cloud Run |
-| Repo demonstrates Google Cloud + ClickHouse actually imported/called at runtime | `@google/genai` imported in the Node.js agent service; the official ClickHouse MCP endpoint is invoked through the TypeScript MCP SDK, not just named in config |
+| Repo demonstrates Google Cloud + ClickHouse actually imported/called at runtime | `@google/adk` and `@google/genai` are imported and executed in the Node.js agent service; the official ClickHouse MCP endpoint is invoked through the TypeScript MCP SDK, not just named in config |
 | Demo video ≤ 3 min, public on YouTube/Vimeo, English | Script in §9 |
 | Deadline | **September 7, 2026, 2:00 PM PT** |
 | Prize (ClickHouse track) | 1st $7,500 (+ social promo opportunity), 2nd $3,000, 3rd $2,000 ([official rules](https://agentic-cinema.devpost.com/rules)) |

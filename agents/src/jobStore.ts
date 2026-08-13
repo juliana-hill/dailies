@@ -95,7 +95,7 @@ export class FirestoreJobStore {
     });
   }
 
-  async checkpoint(jobId: string, workerId: string, status: ProjectStatus, progress: Project['progress']): Promise<void> {
+  async checkpoint(jobId: string, workerId: string, status: ProjectStatus, progress: Project['progress'], activityMessage?: string): Promise<void> {
     const reference = this.jobs.doc(jobId); const projectReference = this.projects.doc(jobId);
     await this.firestore.runTransaction(async (transaction) => {
       const snapshot = await transaction.get(reference); if (!snapshot.exists) throw new Error('PIPELINE_JOB_NOT_FOUND');
@@ -104,7 +104,7 @@ export class FirestoreJobStore {
       const next = { ...current, status, progress, input: { ...current.input, progress }, leaseExpiresAt: new Date(nowMs + this.leaseMilliseconds).toISOString(), updatedAt: now };
       transaction.set(reference, next);
       transaction.set(projectReference, { status, statusMessage: statusMessage[status], progress, error: FieldValue.delete(), updatedAt: now }, { merge: true });
-      this.appendEvent(transaction, reference, next, 'checkpoint', status, workerId, checkpointSummary(progress));
+      this.appendEvent(transaction, reference, next, 'checkpoint', status, workerId, activityMessage?.slice(0, 500) || checkpointSummary(progress));
     });
   }
 
@@ -179,6 +179,13 @@ export class FirestoreJobStore {
 
 function checkpointSummary(progress: Project['progress']) {
   if (!progress) return 'Checkpoint recorded';
-  return `Checkpoint recorded: ${['analysis', 'soundtrack', 'recommendation', 'editPlan', 'render'].filter((key) => Boolean((progress as any)[key])).join(', ') || 'stage start'}`;
+  const durable = ['analysis', 'soundtrackDraft', 'soundtrack', 'recommendation', 'editPlan', 'render', 'finalCut', 'editorialReview'].filter((key) => Boolean((progress as any)[key]));
+  const iteration = progress.editorialIteration ? `draft ${progress.editorialIteration}` : '';
+  const decision = progress.editorialReview ? `review ${progress.editorialReview.decision}` : '';
+  return `Checkpoint recorded: ${[...durable, iteration, decision].filter(Boolean).join(', ') || 'stage start'}`;
 }
-function withoutRender(progress: NonNullable<Project['progress']>): Project['progress'] { const { render: _render, ...reusable } = progress; return reusable; }
+function withoutRender(progress: NonNullable<Project['progress']>): Project['progress'] {
+  if (progress.finalCut && progress.editorialReview?.decision !== 'revise') { const { render: _render, ...reviewable } = progress; return reviewable; }
+  if (progress.editorialReview?.decision === 'revise') { const { render: _render, finalCut: _finalCut, editorialIteration: _iteration, ...revisable } = progress; return { ...revisable, editorialIteration: 0 }; }
+  const { render: _render, ...reusable } = progress; return reusable;
+}

@@ -15,8 +15,12 @@ export class HttpOrchestrator implements Orchestrator {
     if (accepted.analysis) return completeProjectReportSchema.parse(accepted);
     if (!accepted.jobId) throw new Error('Agent service did not return a job id');
     let jobId = accepted.jobId; let recoveries = 0;
+    let consecutiveTransportFailures = 0;
     for (let attempt = 0; attempt < 4500; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 2000)); const statusResponse = await fetch(`${this.config.AGENT_SERVICE_URL}/jobs/${jobId}`, { headers });
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      let statusResponse: Response;
+      try { statusResponse = await fetch(`${this.config.AGENT_SERVICE_URL}/jobs/${jobId}`, { headers }); consecutiveTransportFailures = 0; }
+      catch (error) { consecutiveTransportFailures += 1; if (consecutiveTransportFailures <= 90) continue; throw error; }
       if (statusResponse.status === 404 && recoveries < 3) { const recovered = await submit(); if (!recovered.jobId) throw new Error('Recovered agent service did not return a job id'); jobId = recovered.jobId; recoveries += 1; continue; }
       if (!statusResponse.ok) throw new Error(`Agent job status returned ${statusResponse.status}`); const job: any = await statusResponse.json();
       if (job.progress) latestProgress = job.progress;

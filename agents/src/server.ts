@@ -29,12 +29,16 @@ export class PipelineCoordinator {
     const heartbeat = setInterval(() => void this.store.renew(jobId, this.workerId).catch(() => undefined), Math.max(5_000, this.leaseSeconds * 333)); heartbeat.unref();
     try {
       const input = { ...claimed.input, progress: claimed.progress, executionAttempt: claimed.attempt };
-      const report = await runWorkflow(input, async (status, progress) => this.store.checkpoint(jobId, this.workerId, status as ProjectStatus, progress));
+      const report = await runWorkflow(input, async (status, progress, activityMessage) => this.store.checkpoint(jobId, this.workerId, status as ProjectStatus, progress, activityMessage));
       await this.store.complete(jobId, this.workerId, report);
     } catch (error) {
       const current = await this.store.get(jobId); const recoveryCount = current?.recoveryCount || 0;
       if (isConfigurationWait(error)) await this.store.waitForService(jobId, this.workerId, error);
-      else if (isRetryable(error) && recoveryCount < 5) await this.store.scheduleRetry(jobId, this.workerId, error, Math.min(5 * 60_000, 10_000 * (2 ** recoveryCount)));
+      else if (isQuotaLimited(error)) {
+        console.warn('Vertex AI quota limited; durable pipeline will retry', error);
+        await this.store.scheduleRetry(jobId, this.workerId, new Error('Vertex AI audio generation is temporarily at capacity; completed cues are preserved'), Math.min(15 * 60_000, 10_000 * (2 ** Math.min(recoveryCount, 6))));
+      }
+      else if (isRetryable(error) && recoveryCount < 12) await this.store.scheduleRetry(jobId, this.workerId, error, Math.min(5 * 60_000, 10_000 * (2 ** recoveryCount)));
       else await this.store.fail(jobId, this.workerId, error);
     }
     finally { clearInterval(heartbeat); }
@@ -43,7 +47,7 @@ export class PipelineCoordinator {
 
 export function createApp(coordinator: PipelineCoordinator) {
   const app = express(); app.use(express.json({ limit: '1mb' }));
-  app.get('/health', (_req, res) => res.json({ ok: true, service: 'dailies-agents', fixtureMode: false, durableJobs: true }));
+  app.get('/health', (_req, res) => res.json({ ok: true, service: 'dailies-agents', fixtureMode: false, durableJobs: true, agentFramework: 'google-adk-typescript', renderedDraftReview: true, maximumDraftIterations: 3 }));
   app.use((req, res, next) => { const expected = process.env.AGENT_SERVICE_TOKEN; if (!expected) return next(); const actual = req.header('authorization')?.replace(/^Bearer /, '') || ''; const a = Buffer.from(actual), b = Buffer.from(expected); if (a.length !== b.length || !timingSafeEqual(a, b)) return res.status(401).json({ error: 'Unauthorized' }); next(); });
   app.post('/jobs', async (req, res, next) => { try { const input = req.body as JobInput; if (!input.projectId || !input.ownerId || !input.videoUri || !input.durationSeconds) return res.status(400).json({ error: 'Invalid job' }); res.status(202).json(await coordinator.submit(input)); } catch (error) { next(error); } });
   app.get('/jobs/:jobId', async (req, res, next) => { try { const value = await coordinator.get(req.params.jobId); value ? res.json(value) : res.status(404).json({ error: 'Job not found' }); } catch (error) { next(error); } });
@@ -65,4 +69,5 @@ export function isRetryable(error: unknown) {
   if (/( is required|mismatch|invalid|removed the entire|no renderable|unauthorized|forbidden|\b40[0134]\b)/.test(message)) return false;
   return /(timeout|timed out|network|fetch failed|econn|socket|quota|rate|\b429\b|\b5\d\d\b|temporar|unavailable|lease)/.test(message);
 }
+export function isQuotaLimited(error: unknown) { return /(resource_exhausted|quota|rate.?limit|\b429\b)/i.test(String((error as any)?.message || error)); }
 function isConfigurationWait(error: unknown) { return /CLICKHOUSE_MCP_(URL|AUTH_TOKEN) is required/i.test(String((error as any)?.message || error)); }

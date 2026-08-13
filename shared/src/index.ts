@@ -55,7 +55,7 @@ export type ViewerScore = z.infer<typeof viewerScoreSchema>;
 
 export const editingSignalSchema = z.object({
   id: z.string().min(1), startSeconds: z.number().nonnegative(), endSeconds: z.number().positive(),
-  type: z.enum(['silence', 'repetition', 'tangent', 'setup', 'low_information_action', 'emphasis', 'visual_issue', 'audio_noise', 'overlay_opportunity', 'joke', 'reveal', 'momentum_shift', 'montage']),
+  type: z.enum(['silence', 'repetition', 'tangent', 'disfluency', 'setup', 'low_information_action', 'emphasis', 'visual_issue', 'audio_noise', 'overlay_opportunity', 'joke', 'reveal', 'momentum_shift', 'montage']),
   confidence: z.number().min(0).max(1), detail: z.string().min(1), suggestedAction: z.string().min(1),
 }).refine((value) => value.endSeconds > value.startSeconds, { message: 'Editing signal end must follow start' });
 
@@ -73,6 +73,7 @@ export const editorialAudioCueSchema = z.object({
   fadeInSeconds: z.number().min(0).max(10).default(.5), fadeOutSeconds: z.number().min(0).max(10).default(.75),
   dialoguePolicy: z.enum(['no_dialogue', 'duck_under_dialogue', 'replace_source_audio']).default('no_dialogue'),
   visualCompanion: z.string().default(''),
+  visualMode: z.enum(['sticker', 'full_frame']).optional(),
   effectStyle: z.enum(['none', 'soft_pop', 'warm_chime', 'celebration_swell', 'comic_bubble']).optional(),
   calloutText: z.string().max(24).optional(),
   generationPrompt: z.string().min(20).optional(),
@@ -125,7 +126,7 @@ export type RetentionInsight = Recommendation;
 export const editSegmentSchema = z.object({
   id: z.string().min(1), sceneId: z.string().optional(), sourceStartSeconds: z.number().nonnegative(),
   sourceEndSeconds: z.number().positive(), action: z.enum(['keep', 'tighten', 'remove', 'fast_forward']), reason: z.string().min(1),
-  playbackRate: z.number().min(0.5).max(8).default(1), originalAudioGainDb: z.number().min(-96).max(6).default(0),
+  playbackRate: z.number().min(0.5).max(100).default(1), originalAudioGainDb: z.number().min(-96).max(6).default(0),
   soundtrackGainDb: z.number().min(-96).max(6).default(-18), transition: z.enum(['cut', 'dissolve']).default('cut'),
   visualTreatment: z.object({ brightness: z.number().min(-1).max(1).default(0), contrast: z.number().min(-1).max(1).default(0), saturation: z.number().min(-1).max(1).default(0), temperature: z.number().min(-1).max(1).default(0) }).optional(),
 }).refine((value) => value.sourceEndSeconds > value.sourceStartSeconds, { message: 'Edit segment end must follow start' });
@@ -144,6 +145,13 @@ export const finalCutResultSchema = z.object({
 });
 export type FinalCutResult = z.infer<typeof finalCutResultSchema>;
 
+export const editorialReviewSchema = z.object({
+  iteration: z.number().int().positive(), decision: z.enum(['pass', 'revise']),
+  score: viewerScoreSchema, summary: z.string().min(1),
+  issues: z.array(z.object({ category: z.enum(['hook', 'pacing', 'clarity', 'visual', 'audio', 'continuity', 'ending']), startSeconds: z.number().nonnegative(), endSeconds: z.number().positive(), severity: z.enum(['minor', 'major', 'blocking']), diagnosis: z.string().min(1), requiredChange: z.string().min(1) }).refine((value) => value.endSeconds > value.startSeconds, { message: 'Review issue end must follow start' })),
+});
+export type EditorialReview = z.infer<typeof editorialReviewSchema>;
+
 export const renderCheckpointSchema = z.object({
   renderJobId: z.string().min(1), assetId: z.string().min(1), outputUri: z.string().min(1), submittedAt: z.string().datetime(),
 });
@@ -151,7 +159,7 @@ export type RenderCheckpoint = z.infer<typeof renderCheckpointSchema>;
 
 export const completeProjectReportSchema = z.object({
   analysis: analysisResultSchema, soundtrack: soundtrackResultSchema, recommendation: recommendationSchema,
-  editPlan: editPlanSchema.optional(), finalCut: finalCutResultSchema.optional(),
+  editPlan: editPlanSchema.optional(), finalCut: finalCutResultSchema.optional(), editorialReview: editorialReviewSchema.optional(),
 });
 export type CompleteProjectReport = z.infer<typeof completeProjectReportSchema>;
 
@@ -162,7 +170,7 @@ export const projectSchema = z.object({
   fixtureMode: z.boolean(), createdAt: z.string().datetime(), updatedAt: z.string().datetime(),
   uploadAssetId: z.string().optional(), report: completeProjectReportSchema.optional(),
   creatorHistoryEnabled: z.boolean().optional(),
-  progress: z.object({ analysis: analysisResultSchema.optional(), soundtrack: soundtrackResultSchema.optional(), recommendation: recommendationSchema.optional(), editPlan: editPlanSchema.optional(), render: renderCheckpointSchema.optional() }).optional(),
+  progress: z.object({ analysis: analysisResultSchema.optional(), soundtrack: soundtrackResultSchema.optional(), soundtrackDraft: soundtrackResultSchema.optional(), recommendation: recommendationSchema.optional(), editPlan: editPlanSchema.optional(), render: renderCheckpointSchema.optional(), finalCut: finalCutResultSchema.optional(), editorialReview: editorialReviewSchema.optional(), editorialIteration: z.number().int().nonnegative().optional() }).optional(),
   error: z.string().optional(),
 });
 export type Project = z.infer<typeof projectSchema>;

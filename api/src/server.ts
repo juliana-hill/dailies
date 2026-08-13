@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import path from 'node:path';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import cors from 'cors';
 import { MAX_VIDEO_DURATION_SECONDS, MAX_VIDEO_FILE_BYTES, MIN_VIDEO_DURATION_SECONDS, projectCreationRequestSchema, projectSchema, type Asset, type Project } from '@dailies/shared';
@@ -71,6 +72,12 @@ export function createApp(deps: Dependencies) {
     if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || start > end || start >= total) return res.status(416).set('Content-Range', `bytes */${total}`).end();
     res.status(206).set({ 'Content-Range': `bytes ${start}-${end}/${total}`, 'Content-Length': String(end - start + 1) }); (await storage.readStream(path, { start, end })).pipe(res);
   } catch (e) { next(e); } });
+  if (config.NODE_ENV === 'production') {
+    const frontendDirectory = process.env.FRONTEND_DIST_DIR || '/app/frontend/dist';
+    app.get('/', (_req, res) => res.redirect('/studio/'));
+    app.use('/studio', express.static(frontendDirectory));
+    app.get('/studio/*', (_req, res) => res.sendFile(path.join(frontendDirectory, 'index.html')));
+  }
   app.use((error: any, req: Request, res: Response, _next: NextFunction) => { const validation = error?.issues?.map((issue: any) => `${issue.path.join('.')}: ${issue.message}`); const code = error?.message === 'PROJECT_NOT_FOUND' ? 404 : validation ? 400 : 500; const message = safeError(error?.message || 'Unknown service failure'); console.error(JSON.stringify({ level: 'error', method: req.method, path: req.path, code, message })); res.status(code).json({ error: { code: code === 404 ? 'PROJECT_NOT_FOUND' : validation ? 'INVALID_REQUEST' : 'SERVICE_ERROR', message: code === 500 ? `The service could not complete the request: ${message}` : validation ? `Please check the project details: ${validation.join('; ')}` : message, retryable: code >= 500, ...(validation && { details: validation }) } }); });
   return app;
 }
