@@ -29,6 +29,37 @@ export function hasTransparentBackground(bytes: Buffer, mimeType: string): boole
     return transparent / (image.width * image.height) >= .05 && edgeTransparent / edgePixels >= .8;
   } catch { return false; }
 }
+function removeFlatBackground(bytes: Buffer, mimeType: string): { bytes: Buffer; mimeType: string } {
+  if (mimeType !== 'image/png') return { bytes, mimeType };
+  try {
+    const image = PNG.sync.read(bytes);
+    const sample = (x: number, y: number) => { const i = (image.width * y + x) * 4; return [image.data[i], image.data[i + 1], image.data[i + 2]]; };
+    const corners = [sample(0, 0), sample(image.width - 1, 0), sample(0, image.height - 1), sample(image.width - 1, image.height - 1)];
+    const bg = [0, 1, 2].map((channel) => Math.round(corners.reduce((sum, color) => sum + color[channel], 0) / corners.length));
+    for (let y = 0; y < image.height; y += 1) for (let x = 0; x < image.width; x += 1) {
+      const i = (image.width * y + x) * 4;
+      const distance = Math.abs(image.data[i] - bg[0]) + Math.abs(image.data[i + 1] - bg[1]) + Math.abs(image.data[i + 2] - bg[2]);
+      if (distance < 75) image.data[i + 3] = 0;
+    }
+    return { bytes: PNG.sync.write(image), mimeType: 'image/png' };
+  } catch { return { bytes, mimeType }; }
+}
+export function isImageCapacityError(error: unknown): boolean {
+  const text = error instanceof Error ? error.message : String(error);
+  return /429|resource[_ ]exhausted|quota|rate.?limit|temporarily at capacity/i.test(text);
+}
+async function requestImagen(project: string, headers: Record<string, string>, prompt: string, needsAlpha: boolean) {
+  const location = process.env.IMAGEN_LOCATION || 'us-central1';
+  const model = process.env.IMAGEN_MODEL || 'imagen-4.0-generate-001';
+  const endpoint = `https://${location}-aiplatform.googleapis.com/v1/projects/${project}/locations/${location}/publishers/google/models/${model}:predict`;
+  const response = await fetch(endpoint, { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify({ instances: [{ prompt }], parameters: { sampleCount: 1, aspectRatio: needsAlpha ? '1:1' : '16:9' } }) });
+  const body: any = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(`Imagen fallback failed with HTTP ${response.status}: ${safeDiagnostic(JSON.stringify(body))}`);
+  const prediction = body?.predictions?.[0];
+  const encoded = prediction?.bytesBase64Encoded || prediction?.structValue?.fields?.bytesBase64Encoded?.stringValue;
+  if (!encoded) throw new Error('Imagen fallback response did not contain an encoded image');
+  return { bytes: Buffer.from(encoded, 'base64'), mimeType: prediction?.mimeType || 'image/png', model };
+}
 export function selectLyriaModel(cue: AnalysisResult['audioCues'][number], proModel = 'lyria-3-pro-preview', clipModel = 'lyria-3-clip-preview'): string {
   const requestedDurationSeconds = Math.max(0, cue.endSeconds - cue.startSeconds);
   return requestedDurationSeconds <= 30 ? clipModel : proModel;
@@ -116,15 +147,36 @@ export async function generateScore(
     const visualPrompt = needsAlpha
       ? `${cue.visualGenerationPrompt.trim()} Return exactly one finished isolated visual asset as a PNG with a genuine alpha-transparent background. Background pixels must have alpha 0. Do not draw, render, simulate, or include a checkerboard, grid, canvas, backdrop, card, square, shadow panel, or background color. Keep generous transparent padding around the subject.`
       : `${cue.visualGenerationPrompt.trim()} Return exactly one polished full-frame 16:9 PNG composition. Fill every edge of the canvas. Do not include a checkerboard, watermark, fake transparency grid, or accidental border.`;
-    let image: ReturnType<typeof extractImage> | undefined;
+    let image: ReturnType<typeof extractImage> & { model?: string };
+    let capacityError: unknown;
     for (let attempt = 1; attempt <= 3; attempt += 1) {
-      const imageResponse = await imageAi.models.generateContent({ model: imageModel, contents: `${visualPrompt} Asset validation attempt ${attempt} of 3.`, config: { responseModalities: ['TEXT', 'IMAGE'], imageConfig: { imageOutputOptions: { mimeType: 'image/png' } } } as any });
-      const candidate = extractImage(imageResponse); if (!needsAlpha || hasTransparentBackground(candidate.bytes, candidate.mimeType)) { image = candidate; break; }
+      try {
+        const imageResponse = await imageAi.models.generateContent({ model: imageModel, contents: `${visualPrompt} This is validation attempt ${attempt} of 3; ensure the requested transparent background is real alpha, never a checkerboard.`, config: { responseModalities: ['TEXT', 'IMAGE'], imageConfig: { imageOutputOptions: { mimeType: 'image/png' } } } } as any);
+        const candidate = extractImage(imageResponse);
+        if (needsAlpha && !hasTransparentBackground(candidate.bytes, candidate.mimeType)) {
+          await onActivity?.(`Gemini Image returned an opaque overlay for cue ${cue.id}; retrying image generation (${attempt}/3).`);
+          continue;
+        }
+        image = { ...candidate, model: imageModel };
+        break;
+      } catch (error) {
+        if (!isImageCapacityError(error)) throw error;
+        capacityError = error;
+        break;
+      }
     }
-    if (!image) throw new Error(`Gemini Image could not produce a valid ${needsAlpha ? 'transparent overlay' : 'full-frame composition'} for cue ${cue.id} after 3 attempts`);
+    if (!image!) {
+      if (!capacityError) throw new Error(`Gemini Image could not produce a valid transparent overlay for cue ${cue.id} after 3 attempts`);
+      await onActivity?.(`Gemini Image is at capacity for cue ${cue.id}; switching to Vertex Imagen.`);
+      const candidate = await requestImagen(project, { ...headers } as Record<string, string>, visualPrompt, needsAlpha);
+      if (needsAlpha && !hasTransparentBackground(candidate.bytes, candidate.mimeType)) throw new Error(`Imagen fallback produced an opaque overlay for cue ${cue.id}`);
+      image = candidate;
+      await onActivity?.(`Vertex Imagen generated the visual asset for cue ${cue.id}.`);
+    }
+    if (needsAlpha && !hasTransparentBackground(image.bytes, image.mimeType)) throw new Error(`Image providers could not produce a transparent overlay for cue ${cue.id}`);
     const overlayId = `overlay_${safe(analysis.projectId)}_${safe(cue.id)}`; const overlayFileName = imageExtension(image.mimeType);
     await storage.file(`${ownerId}/${analysis.projectId}/${overlayId}/${overlayFileName}`).save(image.bytes, { contentType: image.mimeType, resumable: false });
-    generated.visualAsset = { id: overlayId, kind: 'overlay' as const, fileName: overlayFileName, mimeType: image.mimeType, sizeBytes: image.bytes.byteLength, generationModel: imageModel, createdAt: new Date().toISOString() }; generated.visualPrompt = visualPrompt;
+    generated.visualAsset = { id: overlayId, kind: 'overlay' as const, fileName: overlayFileName, mimeType: image.mimeType, sizeBytes: image.bytes.byteLength, generationModel: image.model || imageModel, createdAt: new Date().toISOString() }; generated.visualPrompt = visualPrompt;
     await recovery?.checkpoint?.(soundtrackResultSchema.parse({ needed: true, rationale: `One soundtrack indexed into ${cues.length} analysis-grounded cue slices.`, cues, model: cueModel!, provider, providerJobId, asset: reelAsset, durationSeconds: reelDuration, prompt: reelPrompt, compositionBrief }));
     await onActivity?.(`Generated and checkpointed the Gemini visual paired with reel cue ${cue.id}.`);
   }
