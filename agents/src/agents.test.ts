@@ -47,6 +47,15 @@ describe('agent integrations', () => {
     expect(built.filter).toContain('aresample=48000,aformat=sample_rates=48000:channel_layouts=stereo[aout]');
   });
 
+  it('always pairs a rendered visual callout with an audible effect track', () => {
+    const plan = editPlanSchema.parse({ projectId: 'project-1', rationale: 'Celebrate the reveal.', segments: [{ id: 'reveal', sourceStartSeconds: 0, sourceEndSeconds: 8, action: 'keep', reason: 'Feature reveal.' }] });
+    const built = buildFilterComplex(plan, [], [{ id: 'reveal-pop', startSeconds: 2, endSeconds: 3, type: 'pop', purpose: 'feature reveal', mood: 'bright', energy: .7, gainDb: -15, fadeInSeconds: 0, fadeOutSeconds: .2, dialoguePolicy: 'duck_under_dialogue', visualCompanion: 'new_feature' }]);
+    expect(built.filter).toContain("drawtext=text='✦ NEW!'");
+    expect(built.filter).toContain('sine=frequency=880');
+    expect(built.filter).toContain('[fx0]');
+    expect(built.filter).toContain('normalize=0');
+  });
+
   it('rejects a fast-forward segment that leaves source dialogue audible', () => {
     const plan = editPlanSchema.parse({ projectId: 'project-1', rationale: 'Invalid test.', segments: [{ id: 'bad', sourceStartSeconds: 0, sourceEndSeconds: 8, action: 'fast_forward', playbackRate: 4, originalAudioGainDb: 0, reason: 'Bad mix.' }] });
     expect(() => validateTimeline(plan, 8)).toThrow('must accelerate and mute source audio');

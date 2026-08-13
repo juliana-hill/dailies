@@ -41,7 +41,9 @@ export function buildFilterComplex(plan: EditPlan, cues: MusicCue[] = [], editor
     const label = calloutLabel(cue); const start = mapped!.start; const end = Math.min(outputCursor, start + Math.min(1.8, Math.max(.7, mapped!.end - mapped!.start)));
     const next = `vfx${index}`; const confetti = cue.type === 'sting' || /celebrat|payoff|sparkle|glow/.test(`${cue.visualCompanion} ${cue.purpose}`.toLowerCase()) ? confettiFilters(start, end) : '';
     filters.push(`[${videoLabel}]drawbox=x=iw*0.70:y=ih*0.06:w=iw*0.26:h=ih*0.18:color=#fff2a8@0.28:t=18:enable='between(t,${number(start)},${number(end)})',drawbox=x=iw*0.72:y=ih*0.08:w=iw*0.23:h=ih*0.16:color=#fff2a8@0.94:t=fill:enable='between(t,${number(start)},${number(end)})',drawbox=x=iw*0.72:y=ih*0.08:w=iw*0.23:h=ih*0.16:color=#241f1a@0.9:t=4:enable='between(t,${number(start)},${number(end)})',drawtext=text='${label}':fontcolor=#241f1a:fontsize=h/13:x=w*0.835-tw/2:y=h*0.16-th/2:enable='between(t,${number(start)},${number(end)})'${confetti}[${next}]`); videoLabel = next;
-    const gain = number(dbFactor(Math.min(-8, cue.gainDb)));
+    // Effects paired with visual callouts must remain perceptible after loudness
+    // normalization. Keep them present without overpowering dialogue.
+    const gainDb = Math.max(-12, Math.min(-6, cue.gainDb + 5)); const gain = number(dbFactor(gainDb));
     if (cue.type === 'sting') filters.push(`sine=frequency=660:duration=0.46:sample_rate=48000,volume=${gain}[tone${index}a];sine=frequency=880:duration=0.34:sample_rate=48000,adelay=70:all=1,volume=${gain}[tone${index}b];sine=frequency=1100:duration=0.25:sample_rate=48000,adelay=140:all=1,volume=${gain}[tone${index}c];[tone${index}a][tone${index}b][tone${index}c]amix=inputs=3:duration=longest:normalize=0,aecho=0.8:0.55:35:0.22,afade=t=out:st=0.28:d=0.28,adelay=${Math.round(start * 1000)}:all=1,apad,atrim=0:${number(outputCursor)},aformat=sample_rates=48000:channel_layouts=stereo[fx${index}]`);
     else { const frequency = cue.type === 'laugh_track' ? 520 : 880; filters.push(`sine=frequency=${frequency}:duration=0.16:sample_rate=48000,afade=t=out:st=0.08:d=0.08,volume=${gain},adelay=${Math.round(start * 1000)}:all=1,apad,atrim=0:${number(outputCursor)},aformat=sample_rates=48000:channel_layouts=stereo[fx${index}]`); }
   });
@@ -52,7 +54,7 @@ export function buildFilterComplex(plan: EditPlan, cues: MusicCue[] = [], editor
     filters.push(`[${index + 1}:a]atrim=0:${number(duration)},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=${number(fadeIn)},afade=t=out:st=${number(Math.max(0, duration - fadeOut))}:d=${number(fadeOut)},volume=${number(dbFactor(cue.gainDb))},adelay=${Math.round(mapped!.start * 1000)}:all=1,apad,atrim=0:${number(outputCursor)},aformat=sample_rates=48000:channel_layouts=stereo[music${index}]`);
   });
   const additions = [...mappedCues.map(({ index }) => `[music${index}]`), ...effects.map((_, index) => `[fx${index}]`)];
-  if (additions.length) filters.push(`[dialogue]${additions.join('')}amix=inputs=${additions.length + 1}:duration=first:dropout_transition=0,loudnorm=I=${number(plan.audioCleanup.targetLufs)}:LRA=11:TP=-1.5,aresample=48000,aformat=sample_rates=48000:channel_layouts=stereo[aout]`);
+  if (additions.length) filters.push(`[dialogue]${additions.join('')}amix=inputs=${additions.length + 1}:duration=first:dropout_transition=0:normalize=0,loudnorm=I=${number(plan.audioCleanup.targetLufs)}:LRA=11:TP=-1.5,aresample=48000,aformat=sample_rates=48000:channel_layouts=stereo[aout]`);
   else filters.push(`[dialogue]loudnorm=I=${number(plan.audioCleanup.targetLufs)}:LRA=11:TP=-1.5,aresample=48000,aformat=sample_rates=48000:channel_layouts=stereo[aout]`);
   return { filter: filters.join(';'), durationSeconds: outputCursor };
 }
