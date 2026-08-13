@@ -8,17 +8,23 @@ import { FileProjectRepository, FirestoreProjectRepository, type ProjectReposito
 import { GcsAssetStorage, MemoryAssetStorage, type AssetStorage } from './storage.js';
 import { HttpOrchestrator, type Orchestrator } from './orchestrator.js';
 import { FixtureOrchestrator } from './fixture.js';
+import { createYouTubeConnections, type YouTubeConnections } from './youtubeConnections.js';
 
-type Dependencies = { config: Config; repository: ProjectRepository; storage: AssetStorage; orchestrator: Orchestrator };
+type Dependencies = { config: Config; repository: ProjectRepository; storage: AssetStorage; orchestrator: Orchestrator; youtube?: YouTubeConnections };
 const statusMessage: Record<Project['status'], string> = { created: 'Project created', uploading: 'Uploading footage', uploaded: 'Footage uploaded', analyzing: 'Gemini is analyzing the footage', scoring: 'Lyria is generating the score', querying_insights: 'Querying creator retention through ClickHouse MCP', waiting_for_service: 'Waiting for ClickHouse MCP configuration', editing: 'Building the enhanced edit timeline', rendering: 'Rendering the enhanced final cut', complete: 'Final cut and report ready', failed: 'Processing failed' };
 const safeError = (message: string) => message.replace(/(token|secret|password|authorization)=?\S*/gi, '$1=[redacted]').slice(0, 500);
 
 export function createApp(deps: Dependencies) {
-  const { config, repository, storage, orchestrator } = deps;
+  const { config, repository, storage, orchestrator } = deps; const youtube = deps.youtube || createYouTubeConnections(config);
   const app = express(); app.use(cors({ origin: config.CORS_ORIGIN, credentials: true })); app.use(authMiddleware(config));
   app.get('/api/health', (_req, res) => res.json({ ok: true, service: 'dailies-api', fixtureMode: config.DAILIES_FIXTURE_MODE }));
   app.use(express.json({ limit: '1mb' }));
   app.get('/api/me', requireAuth, async (req, res, next) => { try { res.json({ user: req.user, fixtureMode: config.DAILIES_FIXTURE_MODE, projects: await repository.listForOwner(req.user!.id) }); } catch (e) { next(e); } });
+  app.get('/api/youtube/status', requireAuth, async (req, res, next) => { try { res.json(await youtube.status(req.user!.id)); } catch (e) { next(e); } });
+  app.post('/api/youtube/connect', requireAuth, async (req, res, next) => { try { const status = await youtube.status(req.user!.id); if (!status.configured) return res.status(503).json({ error: { code: 'YOUTUBE_OAUTH_NOT_CONFIGURED', message: 'YouTube OAuth is not configured for this deployment.', retryable: false } }); res.json({ url: await youtube.begin(req.user!.id) }); } catch (e) { next(e); } });
+  app.get('/api/youtube/callback', async (req, res) => { try { const state = String(req.query.state || ''); const code = String(req.query.code || ''); if (!state || !code) throw new Error('Google did not return the required authorization details'); await youtube.finish(state, code); res.redirect(youtube.successUrl('connected')); } catch (error: any) { console.error(JSON.stringify({ level: 'error', path: req.path, message: safeError(error?.message || 'YouTube authorization failed') })); res.redirect(youtube.successUrl('error')); } });
+  app.post('/api/youtube/sync', requireAuth, async (req, res, next) => { try { res.json(await youtube.sync(req.user!.id)); } catch (e) { next(e); } });
+  app.delete('/api/youtube/connection', requireAuth, async (req, res, next) => { try { await youtube.disconnect(req.user!.id); res.status(204).end(); } catch (e) { next(e); } });
   app.post('/api/projects', requireAuth, async (req, res, next) => { try {
     const input = projectCreationRequestSchema.parse(req.body); const now = new Date().toISOString(); const projectId = `proj_${randomUUID()}`;
     if (input.durationSeconds !== undefined && input.durationSeconds < MIN_VIDEO_DURATION_SECONDS) return res.status(400).json({ error: { code: 'INVALID_DURATION', message: 'The video must be at least one second long.', retryable: true } });
@@ -41,27 +47,29 @@ export function createApp(deps: Dependencies) {
   app.post('/api/projects/:projectId/analyze', requireAuth, async (req, res, next) => { try {
     const project = await ownedProject(req, repository); if (project.status === 'complete' || ['analyzing', 'scoring', 'querying_insights', 'waiting_for_service', 'editing', 'rendering'].includes(project.status)) return res.status(202).json(project);
     if (!['uploaded', 'failed'].includes(project.status) || !project.uploadAssetId) return res.status(409).json({ error: { code: 'NOT_UPLOADED', message: 'Upload the project video before starting analysis.', retryable: true } });
-    const started = await repository.update(project.projectId, (p) => ({ ...p, status: 'analyzing', statusMessage: statusMessage.analyzing, error: undefined, updatedAt: new Date().toISOString() }));
+    let creatorHistoryEnabled = false; try { creatorHistoryEnabled = (await youtube.status(req.user!.id)).connected; } catch (error: any) { console.warn(JSON.stringify({ level: 'warn', event: 'youtube_status_unavailable', message: safeError(error?.message || 'YouTube status unavailable') })); }
+    const started = await repository.update(project.projectId, (p) => ({ ...p, creatorHistoryEnabled, status: 'analyzing', statusMessage: statusMessage.analyzing, error: undefined, updatedAt: new Date().toISOString() }));
     void runWorkflow(started, repository, orchestrator, config).catch(() => undefined); res.status(202).json(started);
   } catch (e) { next(e); } });
   app.get('/api/projects/:projectId', requireAuth, async (req, res, next) => { try { res.json(await ownedProject(req, repository)); } catch (e) { next(e); } });
+  app.get('/api/projects/:projectId/activity', requireAuth, async (req, res, next) => { try { const project = await ownedProject(req, repository); res.json(orchestrator.activity ? await orchestrator.activity(project.projectId) : { events: [] }); } catch (e) { next(e); } });
   app.get('/api/projects/:projectId/assets/:assetId', requireAuth, async (req, res, next) => { try {
-    const project = await ownedProject(req, repository); const assets: Asset[] = [project.report?.soundtrack.asset, project.report?.finalCut?.asset].filter(Boolean) as Asset[];
+    const project = await ownedProject(req, repository); const assets: Asset[] = [project.report?.soundtrack.asset, ...((project.report?.soundtrack.cues || []).map((cue) => cue.asset)), project.report?.finalCut?.asset].filter(Boolean) as Asset[];
     if (project.uploadAssetId === req.params.assetId) assets.push({ id: project.uploadAssetId, kind: 'video', fileName: project.fileName, mimeType: project.mimeType, createdAt: project.createdAt });
     const asset = assets.find((a) => a.id === req.params.assetId); if (!asset) return res.status(404).json({ error: { code: 'ASSET_NOT_FOUND', message: 'Asset not found.', retryable: false } });
-    if (config.DAILIES_FIXTURE_MODE && asset.kind === 'video') return res.json({ url: `/api/projects/${project.projectId}/assets/${asset.id}/content`, expiresAt: new Date(Date.now() + 15 * 60_000).toISOString() });
-    res.json(await storage.signedReadUrl(`${project.ownerId}/${project.projectId}/${asset.id}/${asset.fileName}`));
+    res.json({ url: `/api/projects/${project.projectId}/assets/${asset.id}/content`, expiresAt: new Date(Date.now() + 15 * 60_000).toISOString() });
   } catch (e) { next(e); } });
   app.get('/api/projects/:projectId/assets/:assetId/content', requireAuth, async (req, res, next) => { try {
-    if (!config.DAILIES_FIXTURE_MODE) return res.status(404).end();
-    const project = await ownedProject(req, repository); if (project.uploadAssetId !== req.params.assetId) return res.status(404).end();
-    const data = await storage.read(`${project.ownerId}/${project.projectId}/${project.uploadAssetId}/${project.fileName}`); const range = req.header('range');
-    res.set({ 'Accept-Ranges': 'bytes', 'Content-Type': project.mimeType, 'Cache-Control': 'private, max-age=0' });
-    if (!range) return res.status(200).set('Content-Length', String(data.byteLength)).send(data);
-    const match = /^bytes=(\d*)-(\d*)$/.exec(range); if (!match) return res.status(416).set('Content-Range', `bytes */${data.byteLength}`).end();
-    const start = match[1] ? Number(match[1]) : 0; const end = match[2] ? Math.min(Number(match[2]), data.byteLength - 1) : data.byteLength - 1;
-    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || start > end || start >= data.byteLength) return res.status(416).set('Content-Range', `bytes */${data.byteLength}`).end();
-    const chunk = data.subarray(start, end + 1); res.status(206).set({ 'Content-Range': `bytes ${start}-${end}/${data.byteLength}`, 'Content-Length': String(chunk.byteLength) }).send(chunk);
+    const project = await ownedProject(req, repository); const assets: Asset[] = [project.report?.soundtrack.asset, ...((project.report?.soundtrack.cues || []).map((cue) => cue.asset)), project.report?.finalCut?.asset].filter(Boolean) as Asset[];
+    if (project.uploadAssetId) assets.push({ id: project.uploadAssetId, kind: 'video', fileName: project.fileName, mimeType: project.mimeType, createdAt: project.createdAt });
+    const asset = assets.find((item) => item.id === req.params.assetId); if (!asset) return res.status(404).end();
+    const path = `${project.ownerId}/${project.projectId}/${asset.id}/${asset.fileName}`; const total = await storage.size(path); const range = req.header('range');
+    res.set({ 'Accept-Ranges': 'bytes', 'Content-Type': asset.mimeType, 'Cache-Control': 'private, max-age=0' });
+    if (!range) { res.status(200).set('Content-Length', String(total)); (await storage.readStream(path)).pipe(res); return; }
+    const match = /^bytes=(\d*)-(\d*)$/.exec(range); if (!match) return res.status(416).set('Content-Range', `bytes */${total}`).end();
+    const start = match[1] ? Number(match[1]) : 0; const end = match[2] ? Math.min(Number(match[2]), total - 1) : total - 1;
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || start > end || start >= total) return res.status(416).set('Content-Range', `bytes */${total}`).end();
+    res.status(206).set({ 'Content-Range': `bytes ${start}-${end}/${total}`, 'Content-Length': String(end - start + 1) }); (await storage.readStream(path, { start, end })).pipe(res);
   } catch (e) { next(e); } });
   app.use((error: any, req: Request, res: Response, _next: NextFunction) => { const validation = error?.issues?.map((issue: any) => `${issue.path.join('.')}: ${issue.message}`); const code = error?.message === 'PROJECT_NOT_FOUND' ? 404 : validation ? 400 : 500; const message = safeError(error?.message || 'Unknown service failure'); console.error(JSON.stringify({ level: 'error', method: req.method, path: req.path, code, message })); res.status(code).json({ error: { code: code === 404 ? 'PROJECT_NOT_FOUND' : validation ? 'INVALID_REQUEST' : 'SERVICE_ERROR', message: code === 500 ? `The service could not complete the request: ${message}` : validation ? `Please check the project details: ${validation.join('; ')}` : message, retryable: code >= 500, ...(validation && { details: validation }) } }); });
   return app;

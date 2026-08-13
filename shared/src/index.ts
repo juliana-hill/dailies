@@ -46,6 +46,19 @@ export const sceneSchema = z.object({
 }).refine((value) => value.endSeconds > value.startSeconds, { message: 'Scene end must follow start' });
 export type Scene = z.infer<typeof sceneSchema>;
 
+export const viewerScoreSchema = z.object({
+  hook: z.number().min(0).max(100), pacing: z.number().min(0).max(100), clarity: z.number().min(0).max(100),
+  visualQuality: z.number().min(0).max(100), audioQuality: z.number().min(0).max(100), total: z.number().min(0).max(100),
+  rationale: z.string().min(1),
+});
+export type ViewerScore = z.infer<typeof viewerScoreSchema>;
+
+export const editingSignalSchema = z.object({
+  id: z.string().min(1), startSeconds: z.number().nonnegative(), endSeconds: z.number().positive(),
+  type: z.enum(['silence', 'repetition', 'tangent', 'setup', 'low_information_action', 'emphasis', 'visual_issue', 'audio_noise', 'overlay_opportunity', 'joke', 'reveal', 'momentum_shift', 'montage']),
+  confidence: z.number().min(0).max(1), detail: z.string().min(1), suggestedAction: z.string().min(1),
+}).refine((value) => value.endSeconds > value.startSeconds, { message: 'Editing signal end must follow start' });
+
 export const soundtrackBriefSchema = z.object({
   mood: z.string().min(1), tempo: z.string().min(1), instrumentation: z.string().min(1), prompt: z.string().min(1),
 });
@@ -53,10 +66,20 @@ export const soundtrackSegmentSchema = z.object({
   id: z.string().min(1), startSeconds: z.number().nonnegative(), endSeconds: z.number().positive(),
   mood: z.string().min(1), energy: z.number().min(0).max(1), label: z.string().min(1),
 });
+export const editorialAudioCueSchema = z.object({
+  id: z.string().min(1), startSeconds: z.number().nonnegative(), endSeconds: z.number().positive(),
+  type: z.enum(['music', 'laugh_track', 'pop', 'sting', 'silence']), purpose: z.string().min(1),
+  mood: z.string().min(1), energy: z.number().min(0).max(1), gainDb: z.number().min(-96).max(0).default(-18),
+  fadeInSeconds: z.number().min(0).max(10).default(.5), fadeOutSeconds: z.number().min(0).max(10).default(.75),
+  dialoguePolicy: z.enum(['no_dialogue', 'duck_under_dialogue', 'replace_source_audio']).default('no_dialogue'),
+  visualCompanion: z.string().default(''),
+}).refine((value) => value.endSeconds > value.startSeconds, { message: 'Editorial audio cue end must follow start' });
+export type EditorialAudioCue = z.infer<typeof editorialAudioCueSchema>;
 export const analysisResultSchema = z.object({
   projectId: z.string().min(1), durationSeconds: z.number().positive().max(MAX_VIDEO_DURATION_SECONDS),
   scenes: z.array(sceneSchema).min(1), soundtrackBrief: soundtrackBriefSchema,
-  soundtrackSegments: z.array(soundtrackSegmentSchema).min(1),
+  soundtrackSegments: z.array(soundtrackSegmentSchema).default([]), audioCues: z.array(editorialAudioCueSchema).default([]), editingSignals: z.array(editingSignalSchema).default([]),
+  viewerScore: viewerScoreSchema.optional(),
 });
 export type AnalysisResult = z.infer<typeof analysisResultSchema>;
 
@@ -67,8 +90,10 @@ export const assetSchema = z.object({
 });
 export type Asset = z.infer<typeof assetSchema>;
 
+export const generatedMusicCueSchema = editorialAudioCueSchema.and(z.object({ type: z.literal('music'), asset: assetSchema, durationSeconds: z.number().positive(), prompt: z.string().min(1) }));
 export const soundtrackResultSchema = z.object({
-  asset: assetSchema, durationSeconds: z.number().positive(), model: z.string().min(1), prompt: z.string().min(1),
+  needed: z.boolean().default(true), rationale: z.string().default('Legacy continuous soundtrack.'), cues: z.array(generatedMusicCueSchema).default([]), model: z.string().min(1),
+  asset: assetSchema.optional(), durationSeconds: z.number().positive().optional(), prompt: z.string().optional(),
 });
 export type SoundtrackResult = z.infer<typeof soundtrackResultSchema>;
 
@@ -95,17 +120,23 @@ export type RetentionInsight = Recommendation;
 
 export const editSegmentSchema = z.object({
   id: z.string().min(1), sceneId: z.string().optional(), sourceStartSeconds: z.number().nonnegative(),
-  sourceEndSeconds: z.number().positive(), action: z.enum(['keep', 'tighten', 'remove']), reason: z.string().min(1),
+  sourceEndSeconds: z.number().positive(), action: z.enum(['keep', 'tighten', 'remove', 'fast_forward']), reason: z.string().min(1),
+  playbackRate: z.number().min(0.5).max(8).default(1), originalAudioGainDb: z.number().min(-96).max(6).default(0),
+  soundtrackGainDb: z.number().min(-96).max(6).default(-18), transition: z.enum(['cut', 'dissolve']).default('cut'),
+  visualTreatment: z.object({ brightness: z.number().min(-1).max(1).default(0), contrast: z.number().min(-1).max(1).default(0), saturation: z.number().min(-1).max(1).default(0), temperature: z.number().min(-1).max(1).default(0) }).optional(),
 }).refine((value) => value.sourceEndSeconds > value.sourceStartSeconds, { message: 'Edit segment end must follow start' });
 export const editPlanSchema = z.object({
   projectId: z.string().min(1), segments: z.array(editSegmentSchema).min(1), rationale: z.string().min(1),
   originalAudioGainDb: z.number().max(0).default(0), soundtrackGainDb: z.number().max(0).default(-18),
+  targetDurationSeconds: z.number().positive().optional(), expectedViewerScore: viewerScoreSchema.optional(),
+  audioCleanup: z.object({ reduceNoise: z.boolean().default(false), removeHum: z.boolean().default(false), highPassHz: z.number().min(40).max(200).default(80), targetLufs: z.number().min(-24).max(-8).default(-14) }).default({}),
+  visualStrategy: z.string().default('Balance exposure and color conservatively while protecting skin tones.'),
 });
 export type EditPlan = z.infer<typeof editPlanSchema>;
 
 export const finalCutResultSchema = z.object({
   asset: assetSchema.refine((asset) => asset.kind === 'rendered_video', { message: 'Final cut must be a rendered video asset' }),
-  durationSeconds: z.number().positive(), renderProvider: z.enum(['google-cloud-transcoder', 'fixture']), renderJobId: z.string().min(1),
+  durationSeconds: z.number().positive(), renderProvider: z.enum(['google-cloud-transcoder', 'ffmpeg-cloud-run', 'fixture']), renderJobId: z.string().min(1),
 });
 export type FinalCutResult = z.infer<typeof finalCutResultSchema>;
 
@@ -126,6 +157,7 @@ export const projectSchema = z.object({
   durationSeconds: z.number().positive().optional(), status: projectStatusSchema, statusMessage: z.string(),
   fixtureMode: z.boolean(), createdAt: z.string().datetime(), updatedAt: z.string().datetime(),
   uploadAssetId: z.string().optional(), report: completeProjectReportSchema.optional(),
+  creatorHistoryEnabled: z.boolean().optional(),
   progress: z.object({ analysis: analysisResultSchema.optional(), soundtrack: soundtrackResultSchema.optional(), recommendation: recommendationSchema.optional(), editPlan: editPlanSchema.optional(), render: renderCheckpointSchema.optional() }).optional(),
   error: z.string().optional(),
 });

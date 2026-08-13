@@ -15,7 +15,7 @@ export const authMiddleware = (config: Config) => (req: Request, _res: Response,
   const email = cleanIap(headerValue(req.headers['x-goog-authenticated-user-email']));
   const id = cleanIap(headerValue(req.headers['x-goog-authenticated-user-id']));
   if (email && id) req.user = { ...userFromEmail(email, headerValue(req.headers['x-goog-authenticated-user-name'])), id };
-  else if (config.ALLOW_DEV_AUTH && config.NODE_ENV !== 'production') req.user = userFromEmail(config.DEV_AUTH_EMAIL, config.DEV_AUTH_NAME);
+  else if (config.ALLOW_DEV_AUTH && config.NODE_ENV !== 'production') req.user = { ...userFromEmail(config.DEV_AUTH_EMAIL, config.DEV_AUTH_NAME), ...(config.DEV_AUTH_ID && { id: config.DEV_AUTH_ID }) };
   next();
 };
 export const requireAuth = (req: Request, res: Response, next: NextFunction) => req.user ? next() : res.status(401).json({ error: { code: 'AUTH_REQUIRED', message: 'Sign in with the configured Google identity provider.', retryable: false } });

@@ -1,6 +1,6 @@
 # Dailies
 
-Dailies is an agentic post-production assistant for YouTube creators. The production path uploads creator-owned footage to Cloud Storage, analyzes it with Gemini multimodal, generates an instrumental score with Lyria, queries the creator's normalized retention history through the official ClickHouse MCP server, and returns a grounded next-cut recommendation.
+Dailies is an agentic post-production assistant for YouTube creators. The production path uploads creator-owned footage to Cloud Storage, analyzes it with Gemini multimodal, creates an enhanced edit, and renders the final cut. A creator may optionally connect YouTube read-only to add normalized retention history through ClickHouse MCP; the analysis/edit/render pipeline does not require that connection.
 
 The app never silently falls back to demo data. `DAILIES_FIXTURE_MODE` defaults to `false`; explicit fixture mode is visibly labeled throughout the UI.
 
@@ -9,7 +9,7 @@ The app never silently falls back to demo data. `DAILIES_FIXTURE_MODE` defaults 
 - `frontend/`: Terra's React/Redux Toolkit UI, now backed by authenticated API calls.
 - `api/`: Express ownership, upload, persistence, asset, and orchestration boundary.
 - `shared/`: TypeScript/Zod contracts.
-- `agents/`: Node.js/TypeScript Express orchestration service for Gemini, Lyria, ClickHouse MCP, edit planning, and Cloud Transcoder. Pipeline jobs, leases, checkpoints, and an append-only event ledger are persisted in Firestore.
+- `agents/`: Node.js/TypeScript Express orchestration service for Gemini, Lyria, ClickHouse MCP, edit planning, Cloud Transcoder, and the FFmpeg media renderer. Pipeline jobs, leases, checkpoints, and an append-only event ledger are persisted in Firestore.
 - `ingestion/`: Node.js/TypeScript Express service for official YouTube Analytics OAuth sync and controlled ClickHouse writes.
 - `infra/`: corrected ClickHouse schema and deployment configuration.
 
@@ -17,7 +17,7 @@ The ClickHouse insight read path is `Retention Agent → mcp-clickhouse run_quer
 
 ## Local development
 
-Requirements: Node 20+, Google Cloud Application Default Credentials, a private Cloud Storage bucket, a ClickHouse database, and creator-authorized YouTube OAuth credentials.
+Requirements for the core pipeline: Node 20+, Google Cloud Application Default Credentials, and a private Cloud Storage bucket. ClickHouse and creator-authorized YouTube OAuth are optional retention-history enhancements.
 
 ```bash
 cp .env.example .env
@@ -30,6 +30,8 @@ ALLOW_DEV_AUTH=true PROJECT_REPOSITORY=file AGENT_SERVICE_URL=http://localhost:8
 npm run dev:frontend
 ```
 
+For advanced local renders without installing FFmpeg on the host, build the agents image and start the agent with `TMPDIR=/private/tmp FFMPEG_PATH="$PWD/scripts/ffmpeg-docker.sh"`. The wrapper runs the same FFmpeg binary used by the production image.
+
 Local auth is allowed only when `ALLOW_DEV_AUTH=true` and `NODE_ENV` is not `production`. Production trusts Google Cloud's authenticated identity headers; see [authentication](docs/authentication.md).
 
 ## Deployment
@@ -41,16 +43,20 @@ gcloud config set project "$GCP_PROJECT_ID"
 gcloud services enable artifactregistry.googleapis.com cloudbuild.googleapis.com run.googleapis.com aiplatform.googleapis.com storage.googleapis.com firestore.googleapis.com secretmanager.googleapis.com youtubeanalytics.googleapis.com youtube.googleapis.com
 gcloud artifacts repositories create dailies --repository-format=docker --location="$VERTEX_LOCATION"
 gcloud builds submit . --config infra/cloudbuild.yaml --substitutions="_DOCKERFILE=agents/Dockerfile,_IMAGE=$VERTEX_LOCATION-docker.pkg.dev/$GCP_PROJECT_ID/dailies/agents:latest"
-gcloud run deploy dailies-agents --image "$VERTEX_LOCATION-docker.pkg.dev/$GCP_PROJECT_ID/dailies/agents:latest" --region "$VERTEX_LOCATION" --no-allow-unauthenticated --no-cpu-throttling --min 1 --memory 2Gi --timeout 900 --service-account "dailies-agents@$GCP_PROJECT_ID.iam.gserviceaccount.com" --set-env-vars "GCP_PROJECT_ID=$GCP_PROJECT_ID,GCS_BUCKET=$GCS_BUCKET,VERTEX_LOCATION=$VERTEX_LOCATION,GEMINI_MODEL=$GEMINI_MODEL,LYRIA_MODEL=$LYRIA_MODEL,CLICKHOUSE_MCP_URL=$CLICKHOUSE_MCP_URL,FIRESTORE_PROJECTS_COLLECTION=dailies_projects,FIRESTORE_JOBS_COLLECTION=dailies_pipeline_jobs,PIPELINE_LEASE_SECONDS=60" --set-secrets "CLICKHOUSE_MCP_AUTH_TOKEN=clickhouse-mcp-token:latest"
+gcloud run deploy dailies-agents --image "$VERTEX_LOCATION-docker.pkg.dev/$GCP_PROJECT_ID/dailies/agents:latest" --region "$VERTEX_LOCATION" --no-allow-unauthenticated --no-cpu-throttling --min 1 --memory 4Gi --cpu 2 --timeout 3600 --service-account "dailies-agents@$GCP_PROJECT_ID.iam.gserviceaccount.com" --add-volume "mount-path=/mnt/dailies-media,type=cloud-storage,bucket=$GCS_BUCKET,readonly=false" --set-env-vars "GCP_PROJECT_ID=$GCP_PROJECT_ID,GCS_BUCKET=$GCS_BUCKET,GCS_MOUNT_PATH=/mnt/dailies-media,VERTEX_LOCATION=$VERTEX_LOCATION,GEMINI_MODEL=$GEMINI_MODEL,LYRIA_MODEL=$LYRIA_MODEL,CLICKHOUSE_MCP_URL=$CLICKHOUSE_MCP_URL,FIRESTORE_PROJECTS_COLLECTION=dailies_projects,FIRESTORE_JOBS_COLLECTION=dailies_pipeline_jobs,PIPELINE_LEASE_SECONDS=60" --set-secrets "CLICKHOUSE_MCP_AUTH_TOKEN=clickhouse-mcp-token:latest"
 export AGENT_SERVICE_URL="$(gcloud run services describe dailies-agents --region "$VERTEX_LOCATION" --format='value(status.url)')"
 gcloud builds submit . --config infra/cloudbuild.yaml --substitutions="_DOCKERFILE=api/Dockerfile,_IMAGE=$VERTEX_LOCATION-docker.pkg.dev/$GCP_PROJECT_ID/dailies/api:latest"
-gcloud run deploy dailies-api --image "$VERTEX_LOCATION-docker.pkg.dev/$GCP_PROJECT_ID/dailies/api:latest" --region "$VERTEX_LOCATION" --no-allow-unauthenticated --no-cpu-throttling --memory 1Gi --timeout 900 --service-account "dailies-api@$GCP_PROJECT_ID.iam.gserviceaccount.com" --set-env-vars "GCP_PROJECT_ID=$GCP_PROJECT_ID,GCS_BUCKET=$GCS_BUCKET,AGENT_SERVICE_URL=$AGENT_SERVICE_URL,AGENT_SERVICE_AUDIENCE=$AGENT_SERVICE_URL,PROJECT_REPOSITORY=firestore,DAILIES_FIXTURE_MODE=false"
+gcloud run deploy dailies-api --image "$VERTEX_LOCATION-docker.pkg.dev/$GCP_PROJECT_ID/dailies/api:latest" --region "$VERTEX_LOCATION" --no-allow-unauthenticated --no-cpu-throttling --memory 1Gi --timeout 900 --service-account "dailies-api@$GCP_PROJECT_ID.iam.gserviceaccount.com" --set-env-vars "GCP_PROJECT_ID=$GCP_PROJECT_ID,GCS_BUCKET=$GCS_BUCKET,AGENT_SERVICE_URL=$AGENT_SERVICE_URL,AGENT_SERVICE_AUDIENCE=$AGENT_SERVICE_URL,PROJECT_REPOSITORY=firestore,DAILIES_FIXTURE_MODE=false,YOUTUBE_OAUTH_CLIENT_ID=$YOUTUBE_OAUTH_CLIENT_ID,YOUTUBE_OAUTH_REDIRECT_URI=$YOUTUBE_OAUTH_REDIRECT_URI,YOUTUBE_OAUTH_SUCCESS_URL=$YOUTUBE_OAUTH_SUCCESS_URL,INGESTION_SERVICE_URL=$INGESTION_SERVICE_URL,INGESTION_SERVICE_AUDIENCE=$INGESTION_SERVICE_URL" --set-secrets "YOUTUBE_OAUTH_CLIENT_SECRET=youtube-oauth-client-secret:latest,YOUTUBE_TOKEN_ENCRYPTION_KEY=youtube-token-encryption-key:latest,INGESTION_SERVICE_TOKEN=ingestion-service-token:latest"
 gcloud run services add-iam-policy-binding dailies-agents --region "$VERTEX_LOCATION" --member "serviceAccount:dailies-api@$GCP_PROJECT_ID.iam.gserviceaccount.com" --role roles/run.invoker
 gcloud builds submit . --config infra/cloudbuild.yaml --substitutions="_DOCKERFILE=frontend/Dockerfile,_IMAGE=$VERTEX_LOCATION-docker.pkg.dev/$GCP_PROJECT_ID/dailies/frontend:latest"
 gcloud run deploy dailies-frontend --image "$VERTEX_LOCATION-docker.pkg.dev/$GCP_PROJECT_ID/dailies/frontend:latest" --region "$VERTEX_LOCATION" --no-allow-unauthenticated
 gcloud builds submit . --config infra/cloudbuild.yaml --substitutions="_DOCKERFILE=ingestion/Dockerfile,_IMAGE=$VERTEX_LOCATION-docker.pkg.dev/$GCP_PROJECT_ID/dailies/ingestion:latest"
-gcloud run deploy dailies-ingestion --image "$VERTEX_LOCATION-docker.pkg.dev/$GCP_PROJECT_ID/dailies/ingestion:latest" --region "$VERTEX_LOCATION" --no-allow-unauthenticated --service-account "dailies-ingestion@$GCP_PROJECT_ID.iam.gserviceaccount.com" --set-env-vars "CLICKHOUSE_HOST=$CLICKHOUSE_HOST,CLICKHOUSE_INGEST_USER=$CLICKHOUSE_INGEST_USER,CLICKHOUSE_SECURE=true" --set-secrets "YOUTUBE_OAUTH_TOKEN_JSON=youtube-oauth-token:latest,CLICKHOUSE_INGEST_PASSWORD=clickhouse-ingest-password:latest,INGESTION_SERVICE_TOKEN=ingestion-service-token:latest"
+gcloud run deploy dailies-ingestion --image "$VERTEX_LOCATION-docker.pkg.dev/$GCP_PROJECT_ID/dailies/ingestion:latest" --region "$VERTEX_LOCATION" --no-allow-unauthenticated --service-account "dailies-ingestion@$GCP_PROJECT_ID.iam.gserviceaccount.com" --set-env-vars "CLICKHOUSE_HOST=$CLICKHOUSE_HOST,CLICKHOUSE_INGEST_USER=$CLICKHOUSE_INGEST_USER,CLICKHOUSE_SECURE=true,YOUTUBE_OAUTH_CLIENT_ID=$YOUTUBE_OAUTH_CLIENT_ID,YOUTUBE_OAUTH_REDIRECT_URI=$YOUTUBE_OAUTH_REDIRECT_URI" --set-secrets "YOUTUBE_OAUTH_CLIENT_SECRET=youtube-oauth-client-secret:latest,CLICKHOUSE_INGEST_PASSWORD=clickhouse-ingest-password:latest,INGESTION_SERVICE_TOKEN=ingestion-service-token:latest"
+export INGESTION_SERVICE_URL="$(gcloud run services describe dailies-ingestion --region "$VERTEX_LOCATION" --format='value(status.url)')"
+gcloud run services add-iam-policy-binding dailies-ingestion --region "$VERTEX_LOCATION" --member "serviceAccount:dailies-api@$GCP_PROJECT_ID.iam.gserviceaccount.com" --role roles/run.invoker
 ```
+
+YouTube OAuth is per creator and optional. Configure one Google Web application OAuth client with the exact callback `https://YOUR_API_HOST/api/youtube/callback`. Set the client ID and callback as API environment variables, store `YOUTUBE_OAUTH_CLIENT_SECRET` and a base64-encoded 32-byte `YOUTUBE_TOKEN_ENCRYPTION_KEY` in Secret Manager, and give the API service account Firestore access. Configure the same client ID, secret, and callback on ingestion so it can refresh the encrypted credentials forwarded by the API. Set `INGESTION_SERVICE_URL` and `INGESTION_SERVICE_AUDIENCE` on the API to the private ingestion Cloud Run URL; grant the API service account `roles/run.invoker`. The browser never receives OAuth credentials, and disconnecting revokes Google access and removes the encrypted connection record.
 
 Build and serve `frontend/dist` behind the same IAP-protected HTTPS origin or set `VITE_API_BASE_URL` and an exact credentialed CORS origin before building. Apply `infra/clickhouse/schema.sql` with the controlled ingestion identity. Grant the agent MCP identity `SELECT` only; never set `CLICKHOUSE_ALLOW_WRITE_ACCESS=true` for the agent service.
 

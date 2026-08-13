@@ -15,7 +15,7 @@ export class PipelineCoordinator {
   get(jobId: string) { return this.store.get(jobId); }
   events(jobId: string) { return this.store.listEvents(jobId); }
 
-  async recover() { if (this.recoveryProjectId) { const job = await this.store.get(this.recoveryProjectId); if (job && !['complete', 'failed'].includes(job.status)) this.kick(job.jobId); return; } const jobs = await this.store.recoverable(); jobs.forEach((job) => this.kick(job.jobId)); }
+  async recover() { if (this.recoveryProjectId) { const job = await this.store.get(this.recoveryProjectId); if (job && !['complete', 'failed', 'waiting_for_service'].includes(job.status)) this.kick(job.jobId); return; } const jobs = await this.store.recoverable(); jobs.forEach((job) => this.kick(job.jobId)); }
   startRecoveryLoop() { void this.recover(); this.recoveryTimer = setInterval(() => void this.recover().catch((error) => console.error('Pipeline recovery scan failed', error)), Math.max(10_000, this.leaseSeconds * 500)); this.recoveryTimer.unref(); }
 
   kick(jobId: string) {
@@ -33,7 +33,7 @@ export class PipelineCoordinator {
       await this.store.complete(jobId, this.workerId, report);
     } catch (error) {
       const current = await this.store.get(jobId); const recoveryCount = current?.recoveryCount || 0;
-      if (isConfigurationWait(error)) await this.store.waitForService(jobId, this.workerId, error, 30_000);
+      if (isConfigurationWait(error)) await this.store.waitForService(jobId, this.workerId, error);
       else if (isRetryable(error) && recoveryCount < 5) await this.store.scheduleRetry(jobId, this.workerId, error, Math.min(5 * 60_000, 10_000 * (2 ** recoveryCount)));
       else await this.store.fail(jobId, this.workerId, error);
     }

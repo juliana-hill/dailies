@@ -1,35 +1,49 @@
 import { GoogleAuth } from 'google-auth-library';
-import { finalCutResultSchema, type EditPlan, type FinalCutResult, type RenderCheckpoint, type SoundtrackResult } from '@dailies/shared';
+import { Storage } from '@google-cloud/storage';
+import { parseBuffer } from 'music-metadata';
+import { finalCutResultSchema, type EditPlan, type EditorialAudioCue, type FinalCutResult, type RenderCheckpoint, type SoundtrackResult } from '@dailies/shared';
+import { renderWithFfmpeg, requiresFfmpeg } from './ffmpegRenderer.js';
 
-type RenderInput = { projectId: string; ownerId: string; sourceUri: string; sourceDurationSeconds: number; soundtrack: SoundtrackResult; editPlan: EditPlan; executionAttempt?: number; checkpoint?: RenderCheckpoint };
+type RenderInput = { projectId: string; ownerId: string; sourceUri: string; sourceDurationSeconds: number; soundtrack: SoundtrackResult; editorialCues?: EditorialAudioCue[]; editPlan: EditPlan; executionAttempt?: number; checkpoint?: RenderCheckpoint };
 
 export async function renderFinalCut(input: RenderInput, onSubmitted?: (checkpoint: RenderCheckpoint) => Promise<void>): Promise<FinalCutResult> {
+  if (requiresFfmpeg(input.editPlan) || (input.soundtrack.cues?.length || 0) > 0 || (input.editorialCues?.some((cue) => cue.type !== 'music' && cue.type !== 'silence') ?? false) || !input.soundtrack.asset) return renderWithFfmpeg(input, onSubmitted);
   if (input.sourceDurationSeconds < 5) throw new Error('Cloud Transcoder requires source footage of at least five seconds');
   const project = required('GCP_PROJECT_ID'); const bucket = required('GCS_BUCKET'); const location = process.env.TRANSCODER_LOCATION || 'us-central1';
-  const soundtrackUri = `gs://${bucket}/${input.ownerId}/${input.projectId}/${input.soundtrack.asset.id}/${input.soundtrack.asset.fileName}`;
+  const legacyAsset = input.soundtrack.asset!; const soundtrackUri = `gs://${bucket}/${input.ownerId}/${input.projectId}/${legacyAsset.id}/${legacyAsset.fileName}`;
+  const soundtrackBytes = (await new Storage({ projectId: project }).bucket(bucket).file(`${input.ownerId}/${input.projectId}/${legacyAsset.id}/${legacyAsset.fileName}`).download())[0];
+  const soundtrackMetadata = await parseBuffer(soundtrackBytes, { mimeType: input.soundtrack.asset.mimeType }); const soundtrackDuration = soundtrackMetadata.format.duration; const soundtrackChannels = soundtrackMetadata.format.numberOfChannels || 1;
+  if (!soundtrackDuration || !Number.isFinite(soundtrackDuration)) throw new Error('Could not measure the stored soundtrack duration');
   const renderId = input.checkpoint?.assetId || `render_${safeId(input.projectId)}_${input.executionAttempt || 1}`; const outputPrefix = `${input.ownerId}/${input.projectId}/${renderId}/`; const outputUri = input.checkpoint?.outputUri || `gs://${bucket}/${outputPrefix}`;
   const retained = input.editPlan.segments.filter((segment) => segment.action !== 'remove');
   if (!retained.length) throw new Error('Edit plan removed the entire source video');
-  const editList = retained.map((segment, index) => ({ key: `atom${index}`, inputs: ['source', 'score'], startTimeOffset: seconds(segment.sourceStartSeconds), endTimeOffset: seconds(Math.min(segment.sourceEndSeconds, input.soundtrack.durationSeconds)) })).filter((atom) => Number(atom.endTimeOffset.slice(0, -1)) > Number(atom.startTimeOffset.slice(0, -1)));
+  const editList = retained.flatMap((segment, index) => {
+    const scoredEnd = Math.min(segment.sourceEndSeconds, soundtrackDuration);
+    const atoms = scoredEnd > segment.sourceStartSeconds ? [{ key: `atom${index}-score`, inputs: ['source', 'score'], startTimeOffset: seconds(segment.sourceStartSeconds), endTimeOffset: seconds(scoredEnd), hasScore: true }] : [];
+    if (segment.sourceEndSeconds > Math.max(segment.sourceStartSeconds, soundtrackDuration)) atoms.push({ key: `atom${index}-tail`, inputs: ['source'], startTimeOffset: seconds(Math.max(segment.sourceStartSeconds, soundtrackDuration)), endTimeOffset: seconds(segment.sourceEndSeconds), hasScore: false });
+    return atoms;
+  });
   if (!editList.length) throw new Error('No renderable edit segments overlap the generated soundtrack');
   const mapping = editList.flatMap((atom) => [
     { atomKey: atom.key, inputKey: 'source', inputTrack: 1, inputChannel: 0, outputChannel: 0, gainDb: input.editPlan.originalAudioGainDb },
-    { atomKey: atom.key, inputKey: 'source', inputTrack: 1, inputChannel: 1, outputChannel: 1, gainDb: input.editPlan.originalAudioGainDb },
-    { atomKey: atom.key, inputKey: 'score', inputTrack: 0, inputChannel: 0, outputChannel: 0, gainDb: input.editPlan.soundtrackGainDb },
-    { atomKey: atom.key, inputKey: 'score', inputTrack: 0, inputChannel: 1, outputChannel: 1, gainDb: input.editPlan.soundtrackGainDb },
+    { atomKey: atom.key, inputKey: 'source', inputTrack: 1, inputChannel: 0, outputChannel: 1, gainDb: input.editPlan.originalAudioGainDb },
+    ...(atom.hasScore ? [
+      { atomKey: atom.key, inputKey: 'score', inputTrack: 0, inputChannel: 0, outputChannel: 0, gainDb: input.editPlan.soundtrackGainDb },
+      { atomKey: atom.key, inputKey: 'score', inputTrack: 0, inputChannel: soundtrackChannels > 1 ? 1 : 0, outputChannel: 1, gainDb: input.editPlan.soundtrackGainDb },
+    ] : []),
   ]);
-  const job = { config: { inputs: [{ key: 'source', uri: input.sourceUri }, { key: 'score', uri: soundtrackUri }], editList, elementaryStreams: [
+  const job = { config: { inputs: [{ key: 'source', uri: input.sourceUri }, { key: 'score', uri: soundtrackUri }], editList: editList.map(({ hasScore: _hasScore, ...atom }) => atom), elementaryStreams: [
     { key: 'video', videoStream: { h264: { frameRate: 60, bitrateBps: 20_000_000, rateControlMode: 'crf', crfLevel: 18, frameRateConversionStrategy: 'DOWNSAMPLE', gopDuration: '2s', profile: 'high', preset: 'medium' } } },
     { key: 'audio', audioStream: { codec: 'aac', bitrateBps: 192_000, channelCount: 2, channelLayout: ['fl', 'fr'], sampleRateHertz: 48_000, mapping } },
   ], muxStreams: [{ key: 'final-cut', fileName: 'enhanced-final-cut.mp4', container: 'mp4', elementaryStreams: ['video', 'audio'] }], output: { uri: outputUri } } };
   const client = await new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] }).getClient(); const headers = await client.getRequestHeaders();
-  const deterministicJobName = `projects/${project}/locations/${location}/jobs/${renderId}`;
-  let jobName = input.checkpoint?.renderJobId || deterministicJobName;
+  let jobName = input.checkpoint?.renderJobId || '';
   if (!input.checkpoint) {
-    const endpoint = `https://transcoder.googleapis.com/v1/projects/${project}/locations/${location}/jobs?jobId=${encodeURIComponent(renderId)}`;
+    const endpoint = `https://transcoder.googleapis.com/v1/projects/${project}/locations/${location}/jobs`;
     const created = await fetch(endpoint, { method: 'POST', headers: { ...headers, 'content-type': 'application/json' } as Record<string, string>, body: JSON.stringify(job) });
-    if (created.ok) { const value: any = await created.json(); jobName = String(value.name || deterministicJobName); }
-    else if (created.status !== 409) throw new Error(`Transcoder job creation failed (${created.status}): ${(await created.text()).slice(0, 400)}`);
+    if (!created.ok) throw new Error(`Transcoder job creation failed (${created.status}): ${(await created.text()).slice(0, 400)}`);
+    const value: any = await created.json(); jobName = String(value.name || '');
+    if (!jobName) throw new Error('Transcoder job creation returned no resource name');
     const checkpoint = { renderJobId: jobName, assetId: renderId, outputUri, submittedAt: new Date().toISOString() } satisfies RenderCheckpoint;
     await onSubmitted?.(checkpoint);
   }

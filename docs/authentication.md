@@ -6,4 +6,4 @@ For IAP, configure the OAuth consent screen and request `openid`, `email`, and `
 
 The browser session is the secure, HTTP-only cookie managed by the identity proxy. Dailies does not store passwords or identity tokens in local storage. Signing out redirects to the configured identity-provider logout URL (`VITE_SIGN_OUT_URL`).
 
-Local development has no fake production sign-in. Set `ALLOW_DEV_AUTH=true`, `DEV_AUTH_EMAIL`, and `DEV_AUTH_NAME` only for a non-production API process. The config refuses the dev identity path when `NODE_ENV=production`. Leave `DAILIES_FIXTURE_MODE=false` to exercise live services locally.
+Local development has no fake production sign-in. Set `ALLOW_DEV_AUTH=true`, `DEV_AUTH_EMAIL`, and `DEV_AUTH_NAME` only for a non-production API process. `DEV_AUTH_ID` may pin the local session to an existing development owner when rerunning a persisted project. The config refuses the dev identity path when `NODE_ENV=production`. Leave `DAILIES_FIXTURE_MODE=false` to exercise live services locally.

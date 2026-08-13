@@ -70,8 +70,8 @@ export class FirestoreJobStore {
   }
 
   async listEvents(jobId: string, limit = 200): Promise<PipelineEvent[]> {
-    const snapshot = await this.jobs.doc(jobId).collection('events').orderBy('createdAt', 'asc').limit(limit).get();
-    return snapshot.docs.map((doc) => doc.data() as PipelineEvent);
+    const snapshot = await this.jobs.doc(jobId).collection('events').orderBy('createdAt', 'desc').limit(limit).get();
+    return snapshot.docs.map((doc) => doc.data() as PipelineEvent).reverse();
   }
 
   async recoverable(): Promise<DurableJob[]> {
@@ -154,13 +154,13 @@ export class FirestoreJobStore {
     });
   }
 
-  async waitForService(jobId: string, workerId: string, error: unknown, delayMilliseconds: number): Promise<void> {
+  async waitForService(jobId: string, workerId: string, error: unknown): Promise<void> {
     const reference = this.jobs.doc(jobId); const projectReference = this.projects.doc(jobId);
     await this.firestore.runTransaction(async (transaction) => {
       const snapshot = await transaction.get(reference); if (!snapshot.exists) return;
       const current = snapshot.data() as DurableJob; if (current.leaseOwner !== workerId) return;
-      const message = String((error as any)?.message || error || 'Required service is not configured').slice(0, 500); const nowMs = Date.now(); const now = new Date(nowMs).toISOString();
-      const next = { ...current, status: 'queued', error: message, nextAttemptAt: new Date(nowMs + delayMilliseconds).toISOString(), leaseOwner: undefined, leaseExpiresAt: undefined, updatedAt: now };
+      const message = String((error as any)?.message || error || 'Required service is not configured').slice(0, 500); const now = new Date().toISOString();
+      const next = { ...current, status: 'waiting_for_service', error: message, nextAttemptAt: undefined, leaseOwner: undefined, leaseExpiresAt: undefined, updatedAt: now };
       transaction.set(reference, next);
       transaction.set(projectReference, { status: 'waiting_for_service', statusMessage: statusMessage.waiting_for_service, progress: current.progress, error: message, updatedAt: now }, { merge: true });
       this.appendEvent(transaction, reference, next, 'waiting_for_service', 'waiting_for_service', workerId, message);

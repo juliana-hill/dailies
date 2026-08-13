@@ -8,6 +8,10 @@ async function call(path, options = {}) {
 }
 export const api = {
   me: () => call('/api/me'),
+  youtubeStatus: () => call('/api/youtube/status'),
+  youtubeConnect: () => call('/api/youtube/connect', { method: 'POST' }),
+  youtubeSync: () => call('/api/youtube/sync', { method: 'POST' }),
+  youtubeDisconnect: () => call('/api/youtube/connection', { method: 'DELETE' }),
   createProject: (input) => call('/api/projects', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
   upload: async (target, file, duration) => {
     if (target.method === 'POST') return call(target.url, { method: 'POST', headers: { ...target.headers, 'content-type': file.type, 'x-video-duration-seconds': String(duration) }, body: file });
@@ -17,6 +21,7 @@ export const api = {
   },
   analyze: (id) => call(`/api/projects/${id}/analyze`, { method: 'POST' }),
   project: (id) => call(`/api/projects/${id}`),
+  activity: (id) => call(`/api/projects/${id}/activity`),
   assetUrl: async (projectId, assetId) => { const value = await call(`/api/projects/${projectId}/assets/${assetId}`); return { ...value, url: value.url.startsWith('/') ? `${base}${value.url}` : value.url }; },
 };
 export const readVideoDuration = (file) => new Promise((resolve, reject) => {

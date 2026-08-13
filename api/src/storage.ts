@@ -1,5 +1,6 @@
 import { Storage } from '@google-cloud/storage';
 import { GoogleAuth, Impersonated } from 'google-auth-library';
+import { Readable } from 'node:stream';
 import type { Config } from './config.js';
 
 export interface AssetStorage {
@@ -7,6 +8,7 @@ export interface AssetStorage {
   signedWriteUrl(path: string, contentType: string): Promise<{ url: string; expiresAt: string }>;
   size(path: string): Promise<number>;
   read(path: string): Promise<Buffer>;
+  readStream(path: string, range?: { start: number; end: number }): Promise<Readable>;
   signedReadUrl(path: string): Promise<{ url: string; expiresAt: string }>;
 }
 export class GcsAssetStorage implements AssetStorage {
@@ -18,6 +20,7 @@ export class GcsAssetStorage implements AssetStorage {
   async signedWriteUrl(path: string, contentType: string) { const expires = Date.now() + 24 * 60 * 60_000; const [url] = await (await this.file(path)).getSignedUrl({ action: 'write', expires, contentType, version: 'v4' }); return { url, expiresAt: new Date(expires).toISOString() }; }
   async size(path: string) { const [metadata] = await (await this.file(path)).getMetadata(); return Number(metadata.size); }
   async read(path: string) { const [data] = await (await this.file(path)).download(); return data; }
+  async readStream(path: string, range?: { start: number; end: number }) { return (await this.file(path)).createReadStream(range); }
   async signedReadUrl(path: string) { const expires = Date.now() + 15 * 60_000; const [url] = await (await this.file(path)).getSignedUrl({ action: 'read', expires }); return { url, expiresAt: new Date(expires).toISOString() }; }
 }
 export class MemoryAssetStorage implements AssetStorage {
@@ -26,5 +29,6 @@ export class MemoryAssetStorage implements AssetStorage {
   async signedWriteUrl(): Promise<{ url: string; expiresAt: string }> { throw new Error('Signed writes are unavailable in fixture mode'); }
   async size(path: string) { const value = this.values.get(path); if (!value) throw new Error('ASSET_NOT_FOUND'); return value.byteLength; }
   async read(path: string) { const value = this.values.get(path); if (!value) throw new Error('ASSET_NOT_FOUND'); return value; }
+  async readStream(path: string, range?: { start: number; end: number }) { const value = await this.read(path); return Readable.from(range ? value.subarray(range.start, range.end + 1) : value); }
   async signedReadUrl(path: string) { if (!this.values.has(path)) throw new Error('ASSET_NOT_FOUND'); return { url: `memory://${path}`, expiresAt: new Date(Date.now() + 900_000).toISOString() }; }
 }

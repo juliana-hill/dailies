@@ -9,18 +9,21 @@ export const submitProject = createAsyncThunk('project/submit', async ({ file, o
   await api.upload(created.uploadTarget, file, durationSeconds); return await api.analyze(created.project.projectId);
 } catch (error) { return rejectWithValue(errorPayload(error)); } });
 export const fetchProject = createAsyncThunk('project/fetch', async (id, { rejectWithValue }) => { try { return await api.project(id); } catch (error) { return rejectWithValue(errorPayload(error)); } });
+export const fetchPipelineActivity = createAsyncThunk('project/activity', async (id, { rejectWithValue }) => { try { return await api.activity(id); } catch (error) { return rejectWithValue(errorPayload(error)); } });
 export const retryProject = createAsyncThunk('project/retry', async (id, { rejectWithValue }) => { try { return await api.analyze(id); } catch (error) { return rejectWithValue(errorPayload(error)); } });
 export const openProject = createAsyncThunk('project/open', async (id, { rejectWithValue }) => { try { return await api.project(id); } catch (error) { return rejectWithValue(errorPayload(error)); } });
 
-const projectInitial = { id: null, status: 'idle', fileName: '', outline: '', processingStage: 0, error: null, errorCode: null, retryable: false, report: null, uploadAssetId: null, fixtureMode: false };
+const projectInitial = { id: null, status: 'idle', fileName: '', outline: '', processingStage: 0, error: null, errorCode: null, retryable: false, report: null, activity: [], activityError: null, uploadAssetId: null, fixtureMode: false, creatorHistoryEnabled: null };
 const stageFor = { created: 0, uploading: 0, uploaded: 1, analyzing: 1, scoring: 2, querying_insights: 3, waiting_for_service: 3, editing: 4, rendering: 5, complete: 6, failed: 0 };
-const assignProject = (state, project) => { state.id = project.projectId; state.status = project.status; state.fileName = project.fileName; state.outline = project.outline; state.processingStage = stageFor[project.status] ?? 0; state.error = project.error || null; state.report = project.report || null; state.progress = project.progress || null; state.uploadAssetId = project.uploadAssetId || null; state.fixtureMode = project.fixtureMode; };
+const assignProject = (state, project) => { state.id = project.projectId; state.status = project.status; state.fileName = project.fileName; state.outline = project.outline; state.processingStage = stageFor[project.status] ?? 0; state.error = project.error || null; state.report = project.report || null; state.progress = project.progress || null; state.uploadAssetId = project.uploadAssetId || null; state.fixtureMode = project.fixtureMode; state.creatorHistoryEnabled = project.creatorHistoryEnabled ?? null; };
 const projectSlice = createSlice({ name: 'project', initialState: projectInitial, reducers: { projectReset: () => projectInitial, projectFailed: (state, action) => { state.status = 'failed'; state.error = action.payload; }, }, extraReducers: (builder) => builder
   .addCase(submitProject.pending, (state, action) => { state.status = 'uploading'; state.fileName = action.meta.arg.file?.name || ''; state.outline = action.meta.arg.outline || ''; state.error = null; })
   .addCase(submitProject.fulfilled, (state, action) => assignProject(state, action.payload))
   .addCase(submitProject.rejected, (state, action) => { state.status = 'failed'; state.error = action.payload?.message || action.error.message; state.errorCode = action.payload?.code; state.retryable = action.payload?.retryable; })
   .addCase(fetchProject.fulfilled, (state, action) => assignProject(state, action.payload))
   .addCase(fetchProject.rejected, (state, action) => { state.status = 'failed'; state.error = action.payload?.message || action.error.message; state.retryable = action.payload?.retryable; })
+  .addCase(fetchPipelineActivity.fulfilled, (state, action) => { state.activity = action.payload.events || []; state.activityError = null; })
+  .addCase(fetchPipelineActivity.rejected, (state, action) => { state.activityError = action.payload?.message || action.error.message; })
   .addCase(retryProject.pending, (state) => { state.status = 'analyzing'; state.error = null; state.retryable = false; })
   .addCase(retryProject.fulfilled, (state, action) => assignProject(state, action.payload))
   .addCase(retryProject.rejected, (state, action) => { state.status = 'failed'; state.error = action.payload?.message || action.error.message; state.retryable = action.payload?.retryable; })
