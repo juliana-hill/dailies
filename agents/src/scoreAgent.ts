@@ -49,16 +49,26 @@ export function isImageCapacityError(error: unknown): boolean {
   return /429|resource[_ ]exhausted|quota|rate.?limit|temporarily at capacity/i.test(text);
 }
 async function requestImagen(project: string, headers: Record<string, string>, prompt: string, needsAlpha: boolean) {
-  const location = process.env.IMAGEN_LOCATION || 'us-central1';
-  const model = process.env.IMAGEN_MODEL || 'imagen-4.0-generate-001';
-  const endpoint = `https://${location}-aiplatform.googleapis.com/v1/projects/${project}/locations/${location}/publishers/google/models/${model}:predict`;
-  const response = await fetch(endpoint, { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify({ instances: [{ prompt }], parameters: { sampleCount: 1, aspectRatio: needsAlpha ? '1:1' : '16:9' } }) });
-  const body: any = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(`Imagen fallback failed with HTTP ${response.status}: ${safeDiagnostic(JSON.stringify(body))}`);
-  const prediction = body?.predictions?.[0];
-  const encoded = prediction?.bytesBase64Encoded || prediction?.structValue?.fields?.bytesBase64Encoded?.stringValue;
-  if (!encoded) throw new Error('Imagen fallback response did not contain an encoded image');
-  return { bytes: Buffer.from(encoded, 'base64'), mimeType: prediction?.mimeType || 'image/png', model };
+  const configuredModel = process.env.IMAGEN_MODEL || 'imagen-4.0-generate-001';
+  const models = [...new Set([configuredModel, 'imagen-3.0-generate-002', 'imagen-3.0-generate-001'])];
+  const locations = [...new Set([process.env.IMAGEN_LOCATION || 'us-central1', 'global'])];
+  let lastError = 'Imagen fallback was unavailable';
+  for (const location of locations) for (const model of models) {
+    const host = location === 'global' ? 'aiplatform.googleapis.com' : `${location}-aiplatform.googleapis.com`;
+    const endpoint = `https://${host}/v1/projects/${project}/locations/${location}/publishers/google/models/${model}:predict`;
+    const response = await fetch(endpoint, { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify({ instances: [{ prompt }], parameters: { sampleCount: 1, aspectRatio: needsAlpha ? '1:1' : '16:9' } }) });
+    const body: any = await response.json().catch(() => ({}));
+    if (response.ok) {
+      const prediction = body?.predictions?.[0];
+      const encoded = prediction?.bytesBase64Encoded || prediction?.structValue?.fields?.bytesBase64Encoded?.stringValue;
+      if (encoded) return { bytes: Buffer.from(encoded, 'base64'), mimeType: prediction?.mimeType || 'image/png', model };
+      lastError = `Imagen ${model} returned no image`;
+    } else {
+      lastError = `Imagen ${model} (${location}) failed with HTTP ${response.status}: ${safeDiagnostic(JSON.stringify(body))}`;
+      if (![400, 404].includes(response.status)) break;
+    }
+  }
+  throw new Error(`Imagen fallback failed: ${lastError}`);
 }
 export function selectLyriaModel(cue: AnalysisResult['audioCues'][number], proModel = 'lyria-3-pro-preview', clipModel = 'lyria-3-clip-preview'): string {
   const requestedDurationSeconds = Math.max(0, cue.endSeconds - cue.startSeconds);
