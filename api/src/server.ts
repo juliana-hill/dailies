@@ -54,13 +54,13 @@ export function createApp(deps: Dependencies) {
   app.get('/api/projects/:projectId', requireAuth, async (req, res, next) => { try { res.json(await ownedProject(req, repository)); } catch (e) { next(e); } });
   app.get('/api/projects/:projectId/activity', requireAuth, async (req, res, next) => { try { const project = await ownedProject(req, repository); res.json(orchestrator.activity ? await orchestrator.activity(project.projectId) : { events: [] }); } catch (e) { next(e); } });
   app.get('/api/projects/:projectId/assets/:assetId', requireAuth, async (req, res, next) => { try {
-    const project = await ownedProject(req, repository); const assets: Asset[] = [project.report?.soundtrack.asset, ...((project.report?.soundtrack.cues || []).map((cue) => cue.asset)), project.report?.finalCut?.asset].filter(Boolean) as Asset[];
+    const project = await ownedProject(req, repository); const assets: Asset[] = reportAssets(project);
     if (project.uploadAssetId === req.params.assetId) assets.push({ id: project.uploadAssetId, kind: 'video', fileName: project.fileName, mimeType: project.mimeType, createdAt: project.createdAt });
     const asset = assets.find((a) => a.id === req.params.assetId); if (!asset) return res.status(404).json({ error: { code: 'ASSET_NOT_FOUND', message: 'Asset not found.', retryable: false } });
     res.json({ url: `/api/projects/${project.projectId}/assets/${asset.id}/content`, expiresAt: new Date(Date.now() + 15 * 60_000).toISOString() });
   } catch (e) { next(e); } });
   app.get('/api/projects/:projectId/assets/:assetId/content', requireAuth, async (req, res, next) => { try {
-    const project = await ownedProject(req, repository); const assets: Asset[] = [project.report?.soundtrack.asset, ...((project.report?.soundtrack.cues || []).map((cue) => cue.asset)), project.report?.finalCut?.asset].filter(Boolean) as Asset[];
+    const project = await ownedProject(req, repository); const assets: Asset[] = reportAssets(project);
     if (project.uploadAssetId) assets.push({ id: project.uploadAssetId, kind: 'video', fileName: project.fileName, mimeType: project.mimeType, createdAt: project.createdAt });
     const asset = assets.find((item) => item.id === req.params.assetId); if (!asset) return res.status(404).end();
     const path = `${project.ownerId}/${project.projectId}/${asset.id}/${asset.fileName}`; const total = await storage.size(path); const range = req.header('range');
@@ -76,6 +76,7 @@ export function createApp(deps: Dependencies) {
 }
 
 async function ownedProject(req: Request, repository: ProjectRepository) { const value = req.params.projectId; const projectId = Array.isArray(value) ? value[0] : value; const project = await repository.get(projectId); if (!project || project.ownerId !== req.user!.id) throw new Error('PROJECT_NOT_FOUND'); return project; }
+function reportAssets(project: Project): Asset[] { return [project.report?.soundtrack.asset, ...((project.report?.soundtrack.cues || []).flatMap((cue) => [cue.asset, cue.visualAsset])), project.report?.finalCut?.asset].filter(Boolean) as Asset[]; }
 async function runWorkflow(project: Project, repository: ProjectRepository, orchestrator: Orchestrator, config: Config) {
   try {
     const videoUri = config.DAILIES_FIXTURE_MODE ? `fixture://${project.projectId}` : `gs://${config.GCS_BUCKET}/${project.ownerId}/${project.projectId}/${project.uploadAssetId}/${project.fileName}`;

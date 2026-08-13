@@ -73,6 +73,10 @@ export const editorialAudioCueSchema = z.object({
   fadeInSeconds: z.number().min(0).max(10).default(.5), fadeOutSeconds: z.number().min(0).max(10).default(.75),
   dialoguePolicy: z.enum(['no_dialogue', 'duck_under_dialogue', 'replace_source_audio']).default('no_dialogue'),
   visualCompanion: z.string().default(''),
+  effectStyle: z.enum(['none', 'soft_pop', 'warm_chime', 'celebration_swell', 'comic_bubble']).optional(),
+  calloutText: z.string().max(24).optional(),
+  generationPrompt: z.string().min(20).optional(),
+  visualGenerationPrompt: z.union([z.string().min(20), z.literal('')]).optional(),
 }).refine((value) => value.endSeconds > value.startSeconds, { message: 'Editorial audio cue end must follow start' });
 export type EditorialAudioCue = z.infer<typeof editorialAudioCueSchema>;
 export const analysisResultSchema = z.object({
@@ -84,13 +88,13 @@ export const analysisResultSchema = z.object({
 export type AnalysisResult = z.infer<typeof analysisResultSchema>;
 
 export const assetSchema = z.object({
-  id: z.string().min(1), kind: z.enum(['video', 'soundtrack', 'analysis', 'rendered_video']),
+  id: z.string().min(1), kind: z.enum(['video', 'soundtrack', 'overlay', 'analysis', 'rendered_video']),
   fileName: z.string().min(1), mimeType: z.string().min(1), sizeBytes: z.number().int().nonnegative().optional(),
   generationModel: z.string().optional(), createdAt: z.string().datetime(),
 });
 export type Asset = z.infer<typeof assetSchema>;
 
-export const generatedMusicCueSchema = editorialAudioCueSchema.and(z.object({ type: z.literal('music'), asset: assetSchema, durationSeconds: z.number().positive(), prompt: z.string().min(1) }));
+export const generatedMusicCueSchema = editorialAudioCueSchema.and(z.object({ type: z.enum(['music', 'laugh_track', 'pop', 'sting']), asset: assetSchema, visualAsset: assetSchema.optional(), durationSeconds: z.number().positive(), prompt: z.string().min(1), visualPrompt: z.string().optional() }));
 export const soundtrackResultSchema = z.object({
   needed: z.boolean().default(true), rationale: z.string().default('Legacy continuous soundtrack.'), cues: z.array(generatedMusicCueSchema).default([]), model: z.string().min(1),
   asset: assetSchema.optional(), durationSeconds: z.number().positive().optional(), prompt: z.string().optional(),

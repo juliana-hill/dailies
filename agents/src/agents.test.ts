@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'; import { extractAudio } from './scoreAgent.js'; import { buildCorrelationQuery, queryRetention, recommendationFromRows, rowsFromMcpText } from './retentionAgent.js';
+import { describe, expect, it } from 'vitest'; import { extractAudio, extractImage } from './scoreAgent.js'; import { buildCorrelationQuery, queryRetention, recommendationFromRows, rowsFromMcpText } from './retentionAgent.js';
 import { isRetryable } from './server.js';
 import { editPlanSchema } from '@dailies/shared';
 import { buildFilterComplex, requiresFfmpeg } from './ffmpegRenderer.js';
@@ -8,6 +8,7 @@ import { resolveCreatorRecommendation } from './orchestrator.js';
 
 describe('agent integrations', () => {
   it('handles Lyria 3 output', () => expect(extractAudio({ outputs: [{ type: 'audio', data: Buffer.from('audio').toString('base64'), mime_type: 'audio/mpeg' }] }).bytes.toString()).toBe('audio'));
+  it('handles Gemini Image output', () => expect(extractImage({ candidates: [{ content: { parts: [{ inlineData: { data: Buffer.from('image').toString('base64'), mimeType: 'image/png' } }] } }] }).bytes.toString()).toBe('image'));
   it('builds a normalized read query', () => { const query = buildCorrelationQuery('owner', 100); expect(query).toContain('position_ratio'); expect(query).not.toContain('INSERT'); });
   it('reads the ClickHouse MCP columns-and-rows response envelope', () => { const rows = rowsFromMcpText(JSON.stringify({ columns: [{ name: 'position_ratio' }], rows: [{ position_ratio: .42 }] })); expect(rows).toEqual([{ position_ratio: .42 }]); });
   it('maps ClickHouse MCP positional rows to their column names', () => { expect(rowsFromMcpText(JSON.stringify({ columns: ['position_ratio', 'severity_percent'], rows: [[.42, 18]] }))).toEqual([{ position_ratio: .42, severity_percent: 18 }]); });
@@ -49,11 +50,30 @@ describe('agent integrations', () => {
 
   it('always pairs a rendered visual callout with an audible effect track', () => {
     const plan = editPlanSchema.parse({ projectId: 'project-1', rationale: 'Celebrate the reveal.', segments: [{ id: 'reveal', sourceStartSeconds: 0, sourceEndSeconds: 8, action: 'keep', reason: 'Feature reveal.' }] });
-    const built = buildFilterComplex(plan, [], [{ id: 'reveal-pop', startSeconds: 2, endSeconds: 3, type: 'pop', purpose: 'feature reveal', mood: 'bright', energy: .7, gainDb: -15, fadeInSeconds: 0, fadeOutSeconds: .2, dialoguePolicy: 'duck_under_dialogue', visualCompanion: 'new_feature' }]);
-    expect(built.filter).toContain("drawtext=text='✦ NEW!'");
-    expect(built.filter).toContain('sine=frequency=880');
-    expect(built.filter).toContain('[fx0]');
+    const editorial = { id: 'reveal-pop', startSeconds: 2, endSeconds: 3, type: 'pop' as const, purpose: 'feature reveal', mood: 'bright', energy: .7, gainDb: -3, fadeInSeconds: 0, fadeOutSeconds: .2, dialoguePolicy: 'duck_under_dialogue' as const, visualCompanion: 'new_feature', effectStyle: 'soft_pop' as const, calloutText: 'Meet the dashboard' };
+    const generated = { ...editorial, asset: { id: 'lyria-reveal', kind: 'soundtrack' as const, fileName: 'generated-pop.mp3', mimeType: 'audio/mpeg', createdAt: new Date().toISOString() }, visualAsset: { id: 'gemini-reveal', kind: 'overlay' as const, fileName: 'generated-overlay.png', mimeType: 'image/png', createdAt: new Date().toISOString() }, durationSeconds: 30, prompt: 'Original warm feature accent.' };
+    const built = buildFilterComplex(plan, [generated], [editorial]);
+    expect(built.filter).toContain('[2:v]scale=');
+    expect(built.filter).toContain('overlay=x=W-w-48:y=48');
+    expect(built.filter).not.toContain('drawtext=');
+    expect(built.filter).not.toContain('drawbox=');
+    expect(built.filter).not.toContain('sine=frequency');
+    expect(built.filter).toContain('[1:a]atrim=0:1');
+    expect(built.filter).toContain("volume=0.32:enable='between(t,2,2.55)'");
+    expect(built.filter).toContain('[dialogueduck0]');
     expect(built.filter).toContain('normalize=0');
+  });
+
+  it('rejects a visual effect without its Lyria-generated audio asset', () => {
+    const plan = editPlanSchema.parse({ projectId: 'project-1', rationale: 'Reveal.', segments: [{ id: 'reveal', sourceStartSeconds: 0, sourceEndSeconds: 8, action: 'keep', reason: 'Feature reveal.' }] });
+    expect(() => buildFilterComplex(plan, [], [{ id: 'missing', startSeconds: 2, endSeconds: 3, type: 'pop', purpose: 'feature reveal', mood: 'warm', energy: .6, gainDb: -3, fadeInSeconds: 0, fadeOutSeconds: .2, dialoguePolicy: 'duck_under_dialogue', visualCompanion: 'feature' }])).toThrow('requires its Lyria-generated audio asset');
+  });
+
+  it('rejects a visual effect without its Gemini-generated image asset', () => {
+    const plan = editPlanSchema.parse({ projectId: 'project-1', rationale: 'Reveal.', segments: [{ id: 'reveal', sourceStartSeconds: 0, sourceEndSeconds: 8, action: 'keep', reason: 'Feature reveal.' }] });
+    const cue = { id: 'missing-visual', startSeconds: 2, endSeconds: 3, type: 'pop' as const, purpose: 'feature reveal', mood: 'warm', energy: .6, gainDb: -3, fadeInSeconds: 0, fadeOutSeconds: .2, dialoguePolicy: 'duck_under_dialogue' as const, visualCompanion: 'feature' };
+    const generated = { ...cue, asset: { id: 'lyria', kind: 'soundtrack' as const, fileName: 'effect.mp3', mimeType: 'audio/mpeg', createdAt: new Date().toISOString() }, durationSeconds: 30, prompt: 'Warm effect' };
+    expect(() => buildFilterComplex(plan, [generated], [cue])).toThrow('requires its Gemini-generated image asset');
   });
 
   it('rejects a fast-forward segment that leaves source dialogue audible', () => {
