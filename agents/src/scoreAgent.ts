@@ -161,8 +161,14 @@ export async function generateScore(
     if (!image!) {
       if (!capacityError) throw new Error(`Gemini Image could not produce a valid transparent overlay for cue ${cue.id} after 3 attempts`);
       await onActivity?.(`Gemini Image is at capacity for cue ${cue.id}; switching to Nano Banana 2 Lite.`);
-      const candidate = await requestNanoBanana(imageAi, visualPrompt);
-      if (needsAlpha && !hasTransparentBackground(candidate.bytes, candidate.mimeType)) throw new Error(`Imagen fallback produced an opaque overlay for cue ${cue.id}`);
+      let candidate: Awaited<ReturnType<typeof requestNanoBanana>> | undefined;
+      for (let attempt = 1; attempt <= 5; attempt += 1) {
+        const revision = attempt === 1 ? '' : attempt === 2 ? ' Revise the prompt: make the subject a clean sticker cutout with transparent pixels outside the silhouette.' : attempt === 3 ? ' Revise again: export PNG RGBA with alpha 0 outside the subject; never use white, black, gray, or checkerboard as a background.' : ' Final revision: create only the isolated foreground object, surrounded by empty transparent canvas; do not draw any backdrop.';
+        const generated = await requestNanoBanana(imageAi, `${visualPrompt}${revision} Nano Banana validation attempt ${attempt} of 5.`);
+        if (!needsAlpha || hasTransparentBackground(generated.bytes, generated.mimeType)) { candidate = generated; break; }
+        await onActivity?.(`Nano Banana returned an opaque overlay for cue ${cue.id}; retrying image generation (${attempt}/3).`);
+      }
+      if (!candidate) throw new Error(`Nano Banana could not produce a transparent overlay for cue ${cue.id} after 5 prompt revisions`);
       image = candidate;
       await onActivity?.(`Nano Banana 2 Lite generated the visual asset for cue ${cue.id}.`);
     }
