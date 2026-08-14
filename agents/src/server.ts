@@ -47,7 +47,7 @@ export class PipelineCoordinator {
 
 export function createApp(coordinator: PipelineCoordinator) {
   const app = express(); app.use(express.json({ limit: '1mb' }));
-  app.get('/health', (_req, res) => res.json({ ok: true, service: 'dailies-agents', fixtureMode: false, durableJobs: true, agentFramework: 'google-adk-typescript', renderedDraftReview: true, maximumDraftIterations: 3 }));
+  app.get('/health', (_req, res) => res.json({ ok: true, service: 'dailies-agents', cloudBacked: true, durableJobs: true, agentFramework: 'google-adk-typescript', renderedDraftReview: true, maximumDraftIterations: 3 }));
   app.use((req, res, next) => { const expected = process.env.AGENT_SERVICE_TOKEN; if (!expected) return next(); const actual = req.header('authorization')?.replace(/^Bearer /, '') || ''; const a = Buffer.from(actual), b = Buffer.from(expected); if (a.length !== b.length || !timingSafeEqual(a, b)) return res.status(401).json({ error: 'Unauthorized' }); next(); });
   app.post('/jobs', async (req, res, next) => { try { const input = req.body as JobInput; if (!input.projectId || !input.ownerId || !input.videoUri || !input.durationSeconds) return res.status(400).json({ error: 'Invalid job' }); res.status(202).json(await coordinator.submit(input)); } catch (error) { next(error); } });
   app.get('/jobs/:jobId', async (req, res, next) => { try { const value = await coordinator.get(req.params.jobId); value ? res.json(value) : res.status(404).json({ error: 'Job not found' }); } catch (error) { next(error); } });

@@ -7,13 +7,13 @@ import { MemoryProjectRepository } from './repository.js';
 import { MemoryAssetStorage } from './storage.js';
 import type { YouTubeConnections } from './youtubeConnections.js';
 
-const config = configSchema.parse({ NODE_ENV: 'test', ALLOW_DEV_AUTH: 'true', DAILIES_FIXTURE_MODE: 'true' });
+const config = configSchema.parse({ NODE_ENV: 'test' });
 const report = { analysis: { projectId: 'placeholder', durationSeconds: 300, scenes: [{ id: 's1', startSeconds: 0, endSeconds: 300, summary: 'Scene', transcript: '', mood: 'quiet', energy: .3, pacingFlags: [] }], soundtrackBrief: { mood: 'quiet', tempo: '80 BPM', instrumentation: 'piano', prompt: 'instrumental' }, soundtrackSegments: [{ id: 'ss1', startSeconds: 0, endSeconds: 300, mood: 'quiet', energy: .3, label: 'Open' }], audioCues: [], editingSignals: [] }, soundtrack: { needed: true, rationale: 'Legacy test score.', cues: [], asset: { id: 'audio1', kind: 'soundtrack', fileName: 'score.wav', mimeType: 'audio/wav', createdAt: new Date().toISOString() }, durationSeconds: 300, model: 'lyria', prompt: 'instrumental' }, recommendation: { dropOffPositionRatio: .4, dropOffSeconds: 120, severityPercent: 10, observedEvidence: 'Observed', inferredCause: 'Possible', recommendationText: 'Do this', suggestedAction: 'Cut', confidence: 'emerging', supportingVideoIds: [], evidence: [] } } satisfies CompleteProjectReport;
 const setup = () => { const repository = new MemoryProjectRepository(); const storage = new MemoryAssetStorage(); let calls = 0; const app = createApp({ config, repository, storage, orchestrator: { run: async (project, _uri, onStatus) => { calls += 1; await onStatus?.('scoring'); await onStatus?.('querying_insights'); return { ...report, analysis: { ...report.analysis, projectId: project.projectId } }; } } }); return { app, repository, getCalls: () => calls }; };
 const input = { title: 'Cut', outline: '', fileName: 'cut.mp4', mimeType: 'video/mp4', fileSizeBytes: 4, durationSeconds: 30 };
 
 describe('API', () => {
-  it('protects user endpoints', async () => { const app = createApp({ config: { ...config, ALLOW_DEV_AUTH: false }, repository: new MemoryProjectRepository(), storage: new MemoryAssetStorage(), orchestrator: { run: async () => report } }); expect((await request(app).get('/api/me')).status).toBe(401); });
+  it('protects user endpoints', async () => { const app = createApp({ config, repository: new MemoryProjectRepository(), storage: new MemoryAssetStorage(), orchestrator: { run: async () => report } }); expect((await request(app).get('/api/me')).status).toBe(401); });
   it('creates, validates upload, and starts analysis idempotently', async () => {
     const { app, getCalls } = setup(); const created = await request(app).post('/api/projects').send(input); expect(created.status).toBe(201); const id = created.body.project.projectId;
     expect((await request(app).post(`/api/projects/${id}/upload`).set('content-type', 'video/mp4').set('x-video-duration-seconds', '30').send(Buffer.from('bad'))).status).toBe(400);

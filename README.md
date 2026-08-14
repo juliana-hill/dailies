@@ -2,7 +2,7 @@
 
 Dailies is an agentic post-production assistant for YouTube creators. The production path uploads creator-owned footage to Cloud Storage, analyzes it with Gemini multimodal, creates an enhanced edit, and renders the final cut. A creator may optionally connect YouTube read-only to add normalized retention history through ClickHouse MCP; the analysis/edit/render pipeline does not require that connection.
 
-The app never silently falls back to demo data. `DAILIES_FIXTURE_MODE` defaults to `false`; explicit fixture mode is visibly labeled throughout the UI.
+Dailies always runs against its configured cloud services. There is no offline or fixture execution path.
 
 ## Architecture
 
@@ -26,13 +26,13 @@ npm run build
 npm test
 PORT=8081 AGENT_SERVICE_TOKEN=local-agent-token npm run dev:agents
 PORT=8082 INGESTION_SERVICE_TOKEN=local-ingestion-token npm run dev:ingestion
-ALLOW_DEV_AUTH=true PROJECT_REPOSITORY=file AGENT_SERVICE_URL=http://localhost:8081 AGENT_SERVICE_TOKEN=local-agent-token npm run dev:api
+AGENT_SERVICE_URL=http://localhost:8081 AGENT_SERVICE_TOKEN=local-agent-token npm run dev:api
 npm run dev:frontend
 ```
 
 For advanced local renders without installing FFmpeg on the host, build the agents image and start the agent with `TMPDIR=/private/tmp FFMPEG_PATH="$PWD/scripts/ffmpeg-docker.sh"`. The wrapper runs the same FFmpeg binary used by the production image.
 
-Local auth is allowed only when `ALLOW_DEV_AUTH=true` and `NODE_ENV` is not `production`. Production trusts Google Cloud's authenticated identity headers; see [authentication](docs/authentication.md).
+The API always trusts only verified Google Cloud identity headers; see [authentication](docs/authentication.md).
 
 ## Deployment
 
@@ -46,7 +46,7 @@ gcloud builds submit . --config infra/cloudbuild.yaml --substitutions="_DOCKERFI
 gcloud run deploy dailies-agents --image "$VERTEX_LOCATION-docker.pkg.dev/$GCP_PROJECT_ID/dailies/agents:latest" --region "$VERTEX_LOCATION" --no-allow-unauthenticated --no-cpu-throttling --min 1 --memory 4Gi --cpu 2 --timeout 3600 --service-account "dailies-agents@$GCP_PROJECT_ID.iam.gserviceaccount.com" --add-volume "mount-path=/mnt/dailies-media,type=cloud-storage,bucket=$GCS_BUCKET,readonly=false" --set-env-vars "GCP_PROJECT_ID=$GCP_PROJECT_ID,GCS_BUCKET=$GCS_BUCKET,GCS_MOUNT_PATH=/mnt/dailies-media,VERTEX_LOCATION=$VERTEX_LOCATION,GEMINI_MODEL=$GEMINI_MODEL,LYRIA_MODEL=$LYRIA_MODEL,CLICKHOUSE_MCP_URL=$CLICKHOUSE_MCP_URL,FIRESTORE_PROJECTS_COLLECTION=dailies_projects,FIRESTORE_JOBS_COLLECTION=dailies_pipeline_jobs,PIPELINE_LEASE_SECONDS=60" --set-secrets "CLICKHOUSE_MCP_AUTH_TOKEN=clickhouse-mcp-token:latest"
 export AGENT_SERVICE_URL="$(gcloud run services describe dailies-agents --region "$VERTEX_LOCATION" --format='value(status.url)')"
 gcloud builds submit . --config infra/cloudbuild.yaml --substitutions="_DOCKERFILE=api/Dockerfile,_IMAGE=$VERTEX_LOCATION-docker.pkg.dev/$GCP_PROJECT_ID/dailies/api:latest"
-gcloud run deploy dailies-api --image "$VERTEX_LOCATION-docker.pkg.dev/$GCP_PROJECT_ID/dailies/api:latest" --region "$VERTEX_LOCATION" --no-allow-unauthenticated --no-cpu-throttling --memory 1Gi --timeout 900 --service-account "dailies-api@$GCP_PROJECT_ID.iam.gserviceaccount.com" --set-env-vars "GCP_PROJECT_ID=$GCP_PROJECT_ID,GCS_BUCKET=$GCS_BUCKET,AGENT_SERVICE_URL=$AGENT_SERVICE_URL,AGENT_SERVICE_AUDIENCE=$AGENT_SERVICE_URL,PROJECT_REPOSITORY=firestore,DAILIES_FIXTURE_MODE=false,YOUTUBE_OAUTH_CLIENT_ID=$YOUTUBE_OAUTH_CLIENT_ID,YOUTUBE_OAUTH_REDIRECT_URI=$YOUTUBE_OAUTH_REDIRECT_URI,YOUTUBE_OAUTH_SUCCESS_URL=$YOUTUBE_OAUTH_SUCCESS_URL,INGESTION_SERVICE_URL=$INGESTION_SERVICE_URL,INGESTION_SERVICE_AUDIENCE=$INGESTION_SERVICE_URL" --set-secrets "YOUTUBE_OAUTH_CLIENT_SECRET=youtube-oauth-client-secret:latest,YOUTUBE_TOKEN_ENCRYPTION_KEY=youtube-token-encryption-key:latest,INGESTION_SERVICE_TOKEN=ingestion-service-token:latest"
+gcloud run deploy dailies-api --image "$VERTEX_LOCATION-docker.pkg.dev/$GCP_PROJECT_ID/dailies/api:latest" --region "$VERTEX_LOCATION" --no-allow-unauthenticated --no-cpu-throttling --memory 1Gi --timeout 900 --service-account "dailies-api@$GCP_PROJECT_ID.iam.gserviceaccount.com" --set-env-vars "GCP_PROJECT_ID=$GCP_PROJECT_ID,GCS_BUCKET=$GCS_BUCKET,AGENT_SERVICE_URL=$AGENT_SERVICE_URL,AGENT_SERVICE_AUDIENCE=$AGENT_SERVICE_URL,YOUTUBE_OAUTH_CLIENT_ID=$YOUTUBE_OAUTH_CLIENT_ID,YOUTUBE_OAUTH_REDIRECT_URI=$YOUTUBE_OAUTH_REDIRECT_URI,YOUTUBE_OAUTH_SUCCESS_URL=$YOUTUBE_OAUTH_SUCCESS_URL,INGESTION_SERVICE_URL=$INGESTION_SERVICE_URL,INGESTION_SERVICE_AUDIENCE=$INGESTION_SERVICE_AUDIENCE" --set-secrets "YOUTUBE_OAUTH_CLIENT_SECRET=youtube-oauth-client-secret:latest,YOUTUBE_TOKEN_ENCRYPTION_KEY=youtube-token-encryption-key:latest,INGESTION_SERVICE_TOKEN=ingestion-service-token:latest"
 gcloud run services add-iam-policy-binding dailies-agents --region "$VERTEX_LOCATION" --member "serviceAccount:dailies-api@$GCP_PROJECT_ID.iam.gserviceaccount.com" --role roles/run.invoker
 gcloud builds submit . --config infra/cloudbuild.yaml --substitutions="_DOCKERFILE=frontend/Dockerfile,_IMAGE=$VERTEX_LOCATION-docker.pkg.dev/$GCP_PROJECT_ID/dailies/frontend:latest"
 gcloud run deploy dailies-frontend --image "$VERTEX_LOCATION-docker.pkg.dev/$GCP_PROJECT_ID/dailies/frontend:latest" --region "$VERTEX_LOCATION" --no-allow-unauthenticated

@@ -26,7 +26,7 @@ export class GcsAssetStorage implements AssetStorage {
 export class MemoryAssetStorage implements AssetStorage {
   values = new Map<string, Buffer>();
   async put(path: string, data: Buffer) { this.values.set(path, data); return { sizeBytes: data.byteLength }; }
-  async signedWriteUrl(): Promise<{ url: string; expiresAt: string }> { throw new Error('Signed writes are unavailable in fixture mode'); }
+  async signedWriteUrl(): Promise<{ url: string; expiresAt: string }> { throw new Error('Signed writes require Cloud Storage'); }
   async size(path: string) { const value = this.values.get(path); if (!value) throw new Error('ASSET_NOT_FOUND'); return value.byteLength; }
   async read(path: string) { const value = this.values.get(path); if (!value) throw new Error('ASSET_NOT_FOUND'); return value; }
   async readStream(path: string, range?: { start: number; end: number }) { const value = await this.read(path); return Readable.from(range ? value.subarray(range.start, range.end + 1) : value); }

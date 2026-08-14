@@ -1,16 +1,8 @@
 import { z } from 'zod';
 
-const bool = z.enum(['true', 'false']).default('false').transform((v) => v === 'true');
 export const configSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().int().positive().default(8080),
-  DAILIES_FIXTURE_MODE: bool,
-  ALLOW_DEV_AUTH: bool,
-  DEV_AUTH_EMAIL: z.string().email().default('creator@example.com'),
-  DEV_AUTH_NAME: z.string().default('Local Creator'),
-  DEV_AUTH_ID: z.string().min(1).optional(),
-  PROJECT_STORE_PATH: z.string().default('.data/projects.json'),
-  PROJECT_REPOSITORY: z.enum(['firestore', 'file']).default('firestore'),
   FIRESTORE_PROJECTS_COLLECTION: z.string().default('dailies_projects'),
   GCP_PROJECT_ID: z.string().optional(),
   GCS_BUCKET: z.string().optional(),

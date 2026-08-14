@@ -48,6 +48,7 @@ export function isImageCapacityError(error: unknown): boolean {
   const text = error instanceof Error ? error.message : String(error);
   return /429|resource[_ ]exhausted|quota|rate.?limit|temporarily at capacity/i.test(text);
 }
+export type VisualGenerationOptions = { skipVisuals?: boolean; visualCueId?: string; visualPromptOverride?: string };
 async function requestNanoBanana(ai: GoogleGenAI, prompt: string) {
   const model = process.env.GEMINI_IMAGE_FALLBACK_MODEL || 'gemini-3.1-flash-lite-image';
   const response = await ai.models.generateContent({ model, contents: prompt, config: { responseModalities: ['TEXT', 'IMAGE'], imageConfig: { imageOutputOptions: { mimeType: 'image/png' } } } } as any);
@@ -62,6 +63,7 @@ export async function generateScore(
   ownerId: string,
   onActivity?: (message: string) => void | Promise<void>,
   recovery?: { draft?: SoundtrackResult; checkpoint?: (draft: SoundtrackResult) => void | Promise<void> },
+  options?: VisualGenerationOptions,
 ): Promise<SoundtrackResult> {
   const project = required('GCP_PROJECT_ID'); const bucket = required('GCS_BUCKET'); const model = process.env.LYRIA_MODEL || 'lyria-3-pro-preview'; const clipModel = process.env.LYRIA_CLIP_MODEL || process.env.LYRIA_EFFECT_MODEL || 'lyria-3-clip-preview';
   const requestedCues = analysis.audioCues.filter((cue) => cue.type !== 'silence'); const musicCount = requestedCues.filter((cue) => cue.type === 'music').length; const effectCount = requestedCues.length - musicCount;
@@ -134,20 +136,27 @@ export async function generateScore(
   }
 
   const completed = new Map(cues.map((cue) => [cue.id, cue]));
+  const visualQueue = requestedCues.filter((cue) => cue.visualGenerationPrompt?.trim());
+  if (options?.skipVisuals) return soundtrackResultSchema.parse({ needed: true, rationale: `${musicCount} music moment(s) and ${effectCount} sonic accent(s) sliced by Gemini from one consolidated ${providerName(provider)} soundtrack.`, cues, model: cueModel!, provider, providerJobId, asset: reelAsset, durationSeconds: reelDuration, prompt: reelPrompt, compositionBrief });
   for (const cue of requestedCues) {
+    if (options?.visualCueId && options.visualCueId !== cue.id) continue;
     const generated = completed.get(cue.id)!; if (!cue.visualGenerationPrompt?.trim() || generated.visualAsset) continue;
-    const needsAlpha = cue.visualMode !== 'full_frame';
-    const visualPrompt = needsAlpha
-      ? `${cue.visualGenerationPrompt.trim()} Return exactly one finished isolated visual asset as a PNG with a genuine alpha-transparent background. Background pixels must have alpha 0. Do not draw, render, simulate, or include a checkerboard, grid, canvas, backdrop, card, square, shadow panel, or background color. Keep generous transparent padding around the subject.`
-      : `${cue.visualGenerationPrompt.trim()} Return exactly one polished full-frame 16:9 PNG composition. Fill every edge of the canvas. Do not include a checkerboard, watermark, fake transparency grid, or accidental border.`;
+    const visualPosition = visualQueue.findIndex((item) => item.id === cue.id) + 1;
+    await onActivity?.(`Visual queue ${visualPosition}/${visualQueue.length}: generating ${cue.id} with the primary image tool.`);
+    const isFullFrame = cue.visualMode === 'full_frame';
+    const needsAlpha = false;
+    const requestedVisualPrompt = options?.visualPromptOverride?.trim() ? `${cue.visualGenerationPrompt.trim()} Editorial revision from the supervising agent: ${options.visualPromptOverride.trim()}` : cue.visualGenerationPrompt.trim();
+    const visualPrompt = !isFullFrame
+      ? `${requestedVisualPrompt} Return exactly one finished PNG visual asset with an intentional solid or designed background. Never draw, render, simulate, or include a checkerboard, grid, fake transparency pattern, or accidental background.`
+      : `${requestedVisualPrompt} Return exactly one polished full-frame 16:9 PNG composition. Fill every edge of the canvas. Do not include a checkerboard, watermark, fake transparency grid, or accidental border.`;
     let image: ReturnType<typeof extractImage> & { model?: string };
     let capacityError: unknown;
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       try {
-        const imageResponse = await imageAi.models.generateContent({ model: imageModel, contents: `${visualPrompt} This is validation attempt ${attempt} of 3; ensure the requested transparent background is real alpha, never a checkerboard.`, config: { responseModalities: ['TEXT', 'IMAGE'], imageConfig: { imageOutputOptions: { mimeType: 'image/png' } } } } as any);
+        const imageResponse = await imageAi.models.generateContent({ model: imageModel, contents: `${visualPrompt} This is validation attempt ${attempt} of 3; use a deliberate background and never a checkerboard or fake transparency grid.`, config: { responseModalities: ['TEXT', 'IMAGE'], imageConfig: { imageOutputOptions: { mimeType: 'image/png' } } } } as any);
         const candidate = extractImage(imageResponse);
         if (needsAlpha && !hasTransparentBackground(candidate.bytes, candidate.mimeType)) {
-          await onActivity?.(`Gemini Image returned an opaque overlay for cue ${cue.id}; retrying image generation (${attempt}/3).`);
+          await onActivity?.(`Gemini Image returned an opaque overlay for cue ${cue.id}; retrying the primary image tool (${attempt}/3).`);
           continue;
         }
         image = { ...candidate, model: imageModel };
@@ -160,24 +169,24 @@ export async function generateScore(
     }
     if (!image!) {
       if (!capacityError) throw new Error(`Gemini Image could not produce a valid transparent overlay for cue ${cue.id} after 3 attempts`);
-      await onActivity?.(`Gemini Image is at capacity for cue ${cue.id}; switching to Nano Banana 2 Lite.`);
+      await onActivity?.(`Visual queue ${visualPosition}/${visualQueue.length}: primary image tool is at capacity for ${cue.id}; switching to Nano Banana 2 Lite.`);
       let candidate: Awaited<ReturnType<typeof requestNanoBanana>> | undefined;
       for (let attempt = 1; attempt <= 5; attempt += 1) {
         const revision = attempt === 1 ? '' : attempt === 2 ? ' Revise the prompt: make the subject a clean sticker cutout with transparent pixels outside the silhouette.' : attempt === 3 ? ' Revise again: export PNG RGBA with alpha 0 outside the subject; never use white, black, gray, or checkerboard as a background.' : ' Final revision: create only the isolated foreground object, surrounded by empty transparent canvas; do not draw any backdrop.';
-        const generated = await requestNanoBanana(imageAi, `${visualPrompt}${revision} Nano Banana validation attempt ${attempt} of 5.`);
+        const generated = await requestNanoBanana(imageAi, `${visualPrompt}${revision} Nano Banana validation attempt ${attempt} of 5; never use a checkerboard or fake transparency grid.`);
         if (!needsAlpha || hasTransparentBackground(generated.bytes, generated.mimeType)) { candidate = generated; break; }
-        await onActivity?.(`Nano Banana returned an opaque overlay for cue ${cue.id}; retrying image generation (${attempt}/3).`);
+        await onActivity?.(`Nano Banana returned an opaque overlay for cue ${cue.id}; retrying its revised prompt (${attempt}/5).`);
       }
       if (!candidate) throw new Error(`Nano Banana could not produce a transparent overlay for cue ${cue.id} after 5 prompt revisions`);
       image = candidate;
-      await onActivity?.(`Nano Banana 2 Lite generated the visual asset for cue ${cue.id}.`);
+      await onActivity?.(`Visual queue ${visualPosition}/${visualQueue.length}: Nano Banana 2 Lite generated ${cue.id}; checkpointing it.`);
     }
     if (needsAlpha && !hasTransparentBackground(image.bytes, image.mimeType)) throw new Error(`Image providers could not produce a transparent overlay for cue ${cue.id}`);
     const overlayId = `overlay_${safe(analysis.projectId)}_${safe(cue.id)}`; const overlayFileName = imageExtension(image.mimeType);
     await storage.file(`${ownerId}/${analysis.projectId}/${overlayId}/${overlayFileName}`).save(image.bytes, { contentType: image.mimeType, resumable: false });
     generated.visualAsset = { id: overlayId, kind: 'overlay' as const, fileName: overlayFileName, mimeType: image.mimeType, sizeBytes: image.bytes.byteLength, generationModel: image.model || imageModel, createdAt: new Date().toISOString() }; generated.visualPrompt = visualPrompt;
     await recovery?.checkpoint?.(soundtrackResultSchema.parse({ needed: true, rationale: `One soundtrack indexed into ${cues.length} analysis-grounded cue slices.`, cues, model: cueModel!, provider, providerJobId, asset: reelAsset, durationSeconds: reelDuration, prompt: reelPrompt, compositionBrief }));
-    await onActivity?.(`Generated and checkpointed the Gemini visual paired with reel cue ${cue.id}.`);
+    await onActivity?.(`Visual queue ${visualPosition}/${visualQueue.length}: approved and checkpointed ${cue.id}.`);
   }
   return soundtrackResultSchema.parse({ needed: true, rationale: `${musicCount} music moment(s) and ${effectCount} sonic accent(s) sliced by Gemini from one consolidated ${providerName(provider)} soundtrack.`, cues, model: cueModel!, provider, providerJobId, asset: reelAsset, durationSeconds: reelDuration, prompt: reelPrompt, compositionBrief });
 }
@@ -188,6 +197,8 @@ async function createCompositionBrief(ai: GoogleGenAI, analysis: AnalysisResult,
   const basePrompt = `Act as the supervising sound editor for this diagnosed video. Design ONE provider-neutral, executable soundtrack composition brief containing every justified intro, outro, montage, reveal, joke, transition, music, and sound-effect moment in the requested order. The file is an asset reel: sections will later be sliced and placed at their source-video timestamps, so give every section a distinctive onset, complete musical shape, and 0.5-2 seconds of separation. Do not create an always-on background bed.
 
 Choose context-specific organic sounds from the video's actual meaning. Favor warm, tactile, physically plausible sources—water bubbles, keys or small metal objects, glass or wooden taps, fabric movement, finger snaps, hand percussion, breathy air, and natural room textures—only when they serve the diagnosed moment. Integrate sound effects musically; avoid generic high-pitched pings and disconnected soundboard effects. Preserve natural dialogue volume in the eventual edit. Music must be instrumental. Never name or imitate artists, copyrighted songs, brands, lyrics, or spoken catchphrases.
+
+Sound-effect rule: favor one distinct, musical accent per justified cue—closed hi-hat, brushed cymbal, shaker, tuned percussion pipes or a tubular-bell-like pipe hit, marimba/mallet, hand percussion, or a soft wood/metal tap. Do not use generic pings or laugh tracks unless the diagnosis explicitly calls for them.
 
 Complete diagnosis: ${JSON.stringify({ soundtrackBrief: analysis.soundtrackBrief, viewerScore: analysis.viewerScore, scenes: analysis.scenes.map(({ id, startSeconds, endSeconds, summary, mood, energy, pacingFlags }) => ({ id, startSeconds, endSeconds, summary, mood, energy, pacingFlags })), editingSignals: analysis.editingSignals, requestedCues: cues.map((cue) => ({ id: cue.id, sourceVideoStartSeconds: cue.startSeconds, sourceVideoEndSeconds: cue.endSeconds, type: cue.type, purpose: cue.purpose, mood: cue.mood, energy: cue.energy, desiredAssetSeconds: Math.max(.5, cue.endSeconds - cue.startSeconds), dialoguePolicy: cue.dialoguePolicy, direction: cue.generationPrompt, visualCompanion: cue.visualCompanion })) })}`;
   let correction = '';

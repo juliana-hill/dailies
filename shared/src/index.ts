@@ -146,7 +146,7 @@ export type EditPlan = z.infer<typeof editPlanSchema>;
 
 export const finalCutResultSchema = z.object({
   asset: assetSchema.refine((asset) => asset.kind === 'rendered_video', { message: 'Final cut must be a rendered video asset' }),
-  durationSeconds: z.number().positive(), renderProvider: z.enum(['google-cloud-transcoder', 'ffmpeg-cloud-run', 'fixture']), renderJobId: z.string().min(1),
+  durationSeconds: z.number().positive(), renderProvider: z.enum(['google-cloud-transcoder', 'ffmpeg-cloud-run']), renderJobId: z.string().min(1),
 });
 export type FinalCutResult = z.infer<typeof finalCutResultSchema>;
 
@@ -172,7 +172,7 @@ export const projectSchema = z.object({
   projectId: z.string().min(1), ownerId: z.string().min(1), title: z.string().min(1), outline: z.string(),
   fileName: z.string().min(1), mimeType: z.string().min(1), fileSizeBytes: z.number().int().positive(),
   durationSeconds: z.number().positive().optional(), status: projectStatusSchema, statusMessage: z.string(),
-  fixtureMode: z.boolean(), createdAt: z.string().datetime(), updatedAt: z.string().datetime(),
+  createdAt: z.string().datetime(), updatedAt: z.string().datetime(),
   uploadAssetId: z.string().optional(), report: completeProjectReportSchema.optional(),
   creatorHistoryEnabled: z.boolean().optional(),
   progress: z.object({ analysis: analysisResultSchema.optional(), soundtrack: soundtrackResultSchema.optional(), soundtrackDraft: soundtrackResultSchema.optional(), recommendation: recommendationSchema.optional(), editPlan: editPlanSchema.optional(), render: renderCheckpointSchema.optional(), finalCut: finalCutResultSchema.optional(), editorialReview: editorialReviewSchema.optional(), editorialIteration: z.number().int().nonnegative().optional() }).optional(),
@@ -181,7 +181,7 @@ export const projectSchema = z.object({
 export type Project = z.infer<typeof projectSchema>;
 
 export const projectCreationResponseSchema = z.object({ project: projectSchema, uploadTarget: uploadTargetSchema });
-export const meResponseSchema = z.object({ user: authenticatedUserSchema, fixtureMode: z.boolean(), projects: z.array(projectSchema) });
+export const meResponseSchema = z.object({ user: authenticatedUserSchema, projects: z.array(projectSchema) });
 export const assetUrlResponseSchema = z.object({ url: z.string(), expiresAt: z.string().datetime() });
 export const apiErrorSchema = z.object({ error: z.object({ code: z.string(), message: z.string(), retryable: z.boolean(), details: z.array(z.string()).optional() }) });
 export type ApiError = z.infer<typeof apiErrorSchema>;

@@ -1,5 +1,3 @@
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
 import { Firestore } from '@google-cloud/firestore';
 import type { Project } from '@dailies/shared';
 
@@ -19,24 +17,6 @@ export class MemoryProjectRepository implements ProjectRepository {
     const current = this.projects.get(id); if (!current) throw new Error('PROJECT_NOT_FOUND');
     const next = mutate(structuredClone(current)); this.projects.set(id, next); return structuredClone(next);
   }
-}
-
-export class FileProjectRepository extends MemoryProjectRepository {
-  private loaded = false;
-  constructor(private readonly path: string) { super(); }
-  private async load() {
-    if (this.loaded) return; this.loaded = true;
-    try { const values = JSON.parse(await readFile(this.path, 'utf8')) as Project[]; values.forEach((p) => this.projects.set(p.projectId, p)); }
-    catch (error: any) { if (error?.code !== 'ENOENT') throw error; }
-  }
-  private async flush() {
-    await mkdir(dirname(this.path), { recursive: true });
-    const temp = `${this.path}.tmp`; await writeFile(temp, JSON.stringify([...this.projects.values()], null, 2)); await rename(temp, this.path);
-  }
-  override async create(project: Project) { await this.load(); const result = await super.create(project); await this.flush(); return result; }
-  override async get(id: string) { await this.load(); return super.get(id); }
-  override async listForOwner(owner: string) { await this.load(); return super.listForOwner(owner); }
-  override async update(id: string, mutate: (project: Project) => Project) { await this.load(); const result = await super.update(id, mutate); await this.flush(); return result; }
 }
 
 export class FirestoreProjectRepository implements ProjectRepository {

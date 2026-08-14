@@ -5,10 +5,9 @@ import cors from 'cors';
 import { MAX_VIDEO_DURATION_SECONDS, MAX_VIDEO_FILE_BYTES, MIN_VIDEO_DURATION_SECONDS, projectCreationRequestSchema, projectSchema, type Asset, type Project } from '@dailies/shared';
 import { loadConfig, type Config } from './config.js';
 import { authMiddleware, requireAuth } from './auth.js';
-import { FileProjectRepository, FirestoreProjectRepository, type ProjectRepository } from './repository.js';
-import { GcsAssetStorage, MemoryAssetStorage, type AssetStorage } from './storage.js';
+import { FirestoreProjectRepository, type ProjectRepository } from './repository.js';
+import { GcsAssetStorage, type AssetStorage } from './storage.js';
 import { HttpOrchestrator, type Orchestrator } from './orchestrator.js';
-import { FixtureOrchestrator } from './fixture.js';
 import { createYouTubeConnections, type YouTubeConnections } from './youtubeConnections.js';
 
 type Dependencies = { config: Config; repository: ProjectRepository; storage: AssetStorage; orchestrator: Orchestrator; youtube?: YouTubeConnections };
@@ -17,10 +16,10 @@ const safeError = (message: string) => message.replace(/(token|secret|password|a
 
 export function createApp(deps: Dependencies) {
   const { config, repository, storage, orchestrator } = deps; const youtube = deps.youtube || createYouTubeConnections(config);
-  const app = express(); app.use(cors({ origin: config.CORS_ORIGIN, credentials: true })); app.use(authMiddleware(config));
-  app.get('/api/health', (_req, res) => res.json({ ok: true, service: 'dailies-api', fixtureMode: config.DAILIES_FIXTURE_MODE }));
+  const app = express(); app.use(cors({ origin: config.CORS_ORIGIN, credentials: true })); app.use(authMiddleware());
+  app.get('/api/health', (_req, res) => res.json({ ok: true, service: 'dailies-api', cloudBacked: true }));
   app.use(express.json({ limit: '1mb' }));
-  app.get('/api/me', requireAuth, async (req, res, next) => { try { res.json({ user: req.user, fixtureMode: config.DAILIES_FIXTURE_MODE, projects: await repository.listForOwner(req.user!.id) }); } catch (e) { next(e); } });
+  app.get('/api/me', requireAuth, async (req, res, next) => { try { res.json({ user: req.user, projects: await repository.listForOwner(req.user!.id) }); } catch (e) { next(e); } });
   app.get('/api/youtube/status', requireAuth, async (req, res, next) => { try { res.json(await youtube.status(req.user!.id)); } catch (e) { next(e); } });
   app.post('/api/youtube/connect', requireAuth, async (req, res, next) => { try { const status = await youtube.status(req.user!.id); if (!status.configured) return res.status(503).json({ error: { code: 'YOUTUBE_OAUTH_NOT_CONFIGURED', message: 'YouTube OAuth is not configured for this deployment.', retryable: false } }); res.json({ url: await youtube.begin(req.user!.id) }); } catch (e) { next(e); } });
   app.get('/api/youtube/callback', async (req, res) => { try { const state = String(req.query.state || ''); const code = String(req.query.code || ''); if (!state || !code) throw new Error('Google did not return the required authorization details'); await youtube.finish(state, code); res.redirect(youtube.successUrl('connected')); } catch (error: any) { console.error(JSON.stringify({ level: 'error', path: req.path, message: safeError(error?.message || 'YouTube authorization failed') })); res.redirect(youtube.successUrl('error')); } });
@@ -30,9 +29,8 @@ export function createApp(deps: Dependencies) {
     const input = projectCreationRequestSchema.parse(req.body); const now = new Date().toISOString(); const projectId = `proj_${randomUUID()}`;
     if (input.durationSeconds !== undefined && input.durationSeconds < MIN_VIDEO_DURATION_SECONDS) return res.status(400).json({ error: { code: 'INVALID_DURATION', message: 'The video must be at least one second long.', retryable: true } });
     const uploadAssetId = `asset_${randomUUID()}`;
-    const project = projectSchema.parse({ projectId, ownerId: req.user!.id, ...input, ...(!config.DAILIES_FIXTURE_MODE && { uploadAssetId }), status: 'created', statusMessage: statusMessage.created, fixtureMode: config.DAILIES_FIXTURE_MODE, createdAt: now, updatedAt: now });
+    const project = projectSchema.parse({ projectId, ownerId: req.user!.id, ...input, uploadAssetId, status: 'created', statusMessage: statusMessage.created, createdAt: now, updatedAt: now });
     await repository.create(project);
-    if (config.DAILIES_FIXTURE_MODE) return res.status(201).json({ project, uploadTarget: { method: 'POST', url: `/api/projects/${projectId}/upload`, headers: { 'content-type': input.mimeType, 'x-video-duration-seconds': input.durationSeconds ? String(input.durationSeconds) : '' }, maxBytes: MAX_VIDEO_FILE_BYTES } });
     const path = `${project.ownerId}/${project.projectId}/${uploadAssetId}/${project.fileName}`; const signed = await storage.signedWriteUrl(path, input.mimeType);
     res.status(201).json({ project, uploadTarget: { method: 'PUT', url: signed.url, headers: { 'content-type': input.mimeType }, maxBytes: MAX_VIDEO_FILE_BYTES, finalizeUrl: `/api/projects/${projectId}/upload` } });
   } catch (e) { next(e); } });
@@ -41,8 +39,7 @@ export function createApp(deps: Dependencies) {
     const duration = Number(req.header('x-video-duration-seconds') || project.durationSeconds); if (!Number.isFinite(duration) || duration < MIN_VIDEO_DURATION_SECONDS || duration > MAX_VIDEO_DURATION_SECONDS) return res.status(400).json({ error: { code: 'INVALID_DURATION', message: 'A valid video duration from one second through 60 minutes is required.', retryable: true } });
     await repository.update(project.projectId, (p) => ({ ...p, status: 'uploading', statusMessage: statusMessage.uploading, updatedAt: new Date().toISOString() }));
     const assetId = project.uploadAssetId || `asset_${randomUUID()}`; const path = `${project.ownerId}/${project.projectId}/${assetId}/${project.fileName}`;
-    if (config.DAILIES_FIXTURE_MODE) { if (!Buffer.isBuffer(req.body) || req.body.length === 0) return res.status(400).json({ error: { code: 'EMPTY_UPLOAD', message: 'A video body is required.', retryable: true } }); if (req.body.length !== project.fileSizeBytes) return res.status(400).json({ error: { code: 'SIZE_MISMATCH', message: 'Uploaded byte count does not match the declared file size.', retryable: true } }); await storage.put(path, req.body, project.mimeType); }
-    else { const uploadedBytes = await storage.size(path); if (uploadedBytes !== project.fileSizeBytes) return res.status(400).json({ error: { code: 'SIZE_MISMATCH', message: 'Uploaded byte count does not match the declared file size.', retryable: true } }); }
+    const uploadedBytes = await storage.size(path); if (uploadedBytes !== project.fileSizeBytes) return res.status(400).json({ error: { code: 'SIZE_MISMATCH', message: 'Uploaded byte count does not match the declared file size.', retryable: true } });
     const updated = await repository.update(project.projectId, (p) => ({ ...p, durationSeconds: duration, uploadAssetId: assetId, status: 'uploaded', statusMessage: statusMessage.uploaded, updatedAt: new Date().toISOString() })); res.json(updated);
   } catch (e) { next(e); } });
   app.post('/api/projects/:projectId/analyze', requireAuth, async (req, res, next) => { try {
@@ -86,10 +83,10 @@ async function ownedProject(req: Request, repository: ProjectRepository) { const
 function reportAssets(project: Project): Asset[] { return [project.report?.soundtrack.asset, ...((project.report?.soundtrack.cues || []).flatMap((cue) => [cue.asset, cue.visualAsset])), project.report?.finalCut?.asset].filter(Boolean) as Asset[]; }
 async function runWorkflow(project: Project, repository: ProjectRepository, orchestrator: Orchestrator, config: Config) {
   try {
-    const videoUri = config.DAILIES_FIXTURE_MODE ? `fixture://${project.projectId}` : `gs://${config.GCS_BUCKET}/${project.ownerId}/${project.projectId}/${project.uploadAssetId}/${project.fileName}`;
+    const videoUri = `gs://${config.GCS_BUCKET}/${project.ownerId}/${project.projectId}/${project.uploadAssetId}/${project.fileName}`;
     const report = await orchestrator.run(project, videoUri, async (status, progress) => { if (!['analyzing', 'scoring', 'querying_insights', 'waiting_for_service', 'editing', 'rendering'].includes(status)) return; await repository.update(project.projectId, (p) => ({ ...p, status, statusMessage: statusMessage[status], ...(progress && { progress }), updatedAt: new Date().toISOString() })); });
     await repository.update(project.projectId, (p) => ({ ...p, status: 'complete', statusMessage: statusMessage.complete, report, updatedAt: new Date().toISOString() }));
   } catch (error: any) { await repository.update(project.projectId, (p) => ({ ...p, status: 'failed', statusMessage: statusMessage.failed, error: safeError(error?.message || 'Unknown orchestration failure'), updatedAt: new Date().toISOString() })); }
 }
 
-if (process.env.NODE_ENV !== 'test') { const config = loadConfig(); const repository = config.PROJECT_REPOSITORY === 'file' ? new FileProjectRepository(config.PROJECT_STORE_PATH) : new FirestoreProjectRepository(config.GCP_PROJECT_ID, config.FIRESTORE_PROJECTS_COLLECTION); const app = createApp({ config, repository, storage: config.DAILIES_FIXTURE_MODE ? new MemoryAssetStorage() : new GcsAssetStorage(config), orchestrator: config.DAILIES_FIXTURE_MODE ? new FixtureOrchestrator() : new HttpOrchestrator(config) }); app.listen(config.PORT, () => console.log(`Dailies API listening on ${config.PORT}`)); }
+if (process.env.NODE_ENV !== 'test') { const config = loadConfig(); const repository = new FirestoreProjectRepository(config.GCP_PROJECT_ID, config.FIRESTORE_PROJECTS_COLLECTION); const app = createApp({ config, repository, storage: new GcsAssetStorage(config), orchestrator: new HttpOrchestrator(config) }); app.listen(config.PORT, () => console.log(`Dailies API listening on ${config.PORT}`)); }
