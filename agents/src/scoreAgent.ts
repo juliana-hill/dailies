@@ -48,28 +48,10 @@ export function isImageCapacityError(error: unknown): boolean {
   const text = error instanceof Error ? error.message : String(error);
   return /429|resource[_ ]exhausted|quota|rate.?limit|temporarily at capacity/i.test(text);
 }
-async function requestImagen(project: string, headers: Record<string, string>, prompt: string, needsAlpha: boolean) {
-  const configuredModel = process.env.IMAGEN_MODEL || 'imagen-4.0-generate-001';
-  const models = [...new Set([configuredModel, 'imagen-4.0-fast-generate-001', 'imagen-4.0-ultra-generate-001', 'imagen-3.0-generate-002', 'imagen-3.0-generate-001'])];
-  // Imagen does not support the global endpoint; use the configured regional endpoint only.
-  const locations = [process.env.IMAGEN_LOCATION || 'us-central1'];
-  let lastError = 'Imagen fallback was unavailable';
-  for (const location of locations) for (const model of models) {
-    const host = location === 'global' ? 'aiplatform.googleapis.com' : `${location}-aiplatform.googleapis.com`;
-    const endpoint = `https://${host}/v1/projects/${project}/locations/${location}/publishers/google/models/${model}:predict`;
-    const response = await fetch(endpoint, { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify({ instances: [{ prompt }], parameters: { sampleCount: 1, aspectRatio: needsAlpha ? '1:1' : '16:9' } }) });
-    const body: any = await response.json().catch(() => ({}));
-    if (response.ok) {
-      const prediction = body?.predictions?.[0];
-      const encoded = prediction?.bytesBase64Encoded || prediction?.structValue?.fields?.bytesBase64Encoded?.stringValue;
-      if (encoded) return { bytes: Buffer.from(encoded, 'base64'), mimeType: prediction?.mimeType || 'image/png', model };
-      lastError = `Imagen ${model} returned no image`;
-    } else {
-      lastError = `Imagen ${model} (${location}) failed with HTTP ${response.status}: ${safeDiagnostic(JSON.stringify(body))}`;
-      if (![400, 404].includes(response.status)) break;
-    }
-  }
-  throw new Error(`Imagen fallback failed: ${lastError}`);
+async function requestNanoBanana(ai: GoogleGenAI, prompt: string) {
+  const model = process.env.GEMINI_IMAGE_FALLBACK_MODEL || 'gemini-3.1-flash-lite-image';
+  const response = await ai.models.generateContent({ model, contents: prompt, config: { responseModalities: ['TEXT', 'IMAGE'], imageConfig: { imageOutputOptions: { mimeType: 'image/png' } } } } as any);
+  return { ...extractImage(response), model };
 }
 export function selectLyriaModel(cue: AnalysisResult['audioCues'][number], proModel = 'lyria-3-pro-preview', clipModel = 'lyria-3-clip-preview'): string {
   const requestedDurationSeconds = Math.max(0, cue.endSeconds - cue.startSeconds);
@@ -178,11 +160,11 @@ export async function generateScore(
     }
     if (!image!) {
       if (!capacityError) throw new Error(`Gemini Image could not produce a valid transparent overlay for cue ${cue.id} after 3 attempts`);
-      await onActivity?.(`Gemini Image is at capacity for cue ${cue.id}; switching to Vertex Imagen.`);
-      const candidate = await requestImagen(project, { ...headers } as Record<string, string>, visualPrompt, needsAlpha);
+      await onActivity?.(`Gemini Image is at capacity for cue ${cue.id}; switching to Nano Banana 2 Lite.`);
+      const candidate = await requestNanoBanana(imageAi, visualPrompt);
       if (needsAlpha && !hasTransparentBackground(candidate.bytes, candidate.mimeType)) throw new Error(`Imagen fallback produced an opaque overlay for cue ${cue.id}`);
       image = candidate;
-      await onActivity?.(`Vertex Imagen generated the visual asset for cue ${cue.id}.`);
+      await onActivity?.(`Nano Banana 2 Lite generated the visual asset for cue ${cue.id}.`);
     }
     if (needsAlpha && !hasTransparentBackground(image.bytes, image.mimeType)) throw new Error(`Image providers could not produce a transparent overlay for cue ${cue.id}`);
     const overlayId = `overlay_${safe(analysis.projectId)}_${safe(cue.id)}`; const overlayFileName = imageExtension(image.mimeType);
