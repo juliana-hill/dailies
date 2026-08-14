@@ -20,6 +20,11 @@ export const configSchema = z.object({
   INGESTION_SERVICE_TOKEN: z.string().optional(),
   FIRESTORE_YOUTUBE_CONNECTIONS_COLLECTION: z.string().default('dailies_youtube_connections'),
   FIRESTORE_YOUTUBE_STATES_COLLECTION: z.string().default('dailies_youtube_oauth_states'),
+  GOOGLE_SIGN_IN_CLIENT_ID: z.string().min(1).optional(),
+  GOOGLE_SIGN_IN_CLIENT_SECRET: z.string().min(1).optional(),
+  GOOGLE_SIGN_IN_REDIRECT_URI: z.string().url().optional(),
+  GOOGLE_SIGN_IN_SUCCESS_URL: z.string().url().optional(),
+  SESSION_SECRET: z.string().min(32).optional(),
 });
 export type Config = z.infer<typeof configSchema>;
 export const loadConfig = (env: NodeJS.ProcessEnv = process.env): Config => configSchema.parse(env);

@@ -16,8 +16,9 @@ export default function App() {
   const navigate = (destination) => { dispatch(viewChanged('dashboard')); window.setTimeout(() => destination === 'projects' ? document.querySelector('.project-library')?.scrollIntoView({ behavior: 'smooth' }) : destination === 'insights' ? document.querySelector('.dashboard-focus')?.scrollIntoView({ behavior: 'smooth' }) : window.scrollTo({ top: 0, behavior: 'smooth' }), 0); };
   const switchStep = (step) => { if (project.status !== 'complete' && step !== 'project') return; dispatch(activeStepChanged(step)); document.getElementById(step)?.scrollIntoView({ behavior: 'smooth' }); };
   if (auth.status === 'loading') return <main className="auth-page"><section className="auth-form-area"><div className="auth-card"><p className="eyebrow">Creator studio</p><h1>Opening your studio…</h1></div></section></main>;
-  if (auth.status !== 'authenticated') return <AuthPage error={auth.error} onSubmit={() => window.location.assign(import.meta.env.VITE_GOOGLE_SIGN_IN_URL || window.location.href)} />;
-  return <AppShell view={ui.view} activeStep={ui.activeStep} onNavigate={navigate} onStepChange={switchStep} onSignOut={() => window.location.assign(import.meta.env.VITE_SIGN_OUT_URL || '/')} user={auth.user}>
+  const apiBase = import.meta.env.VITE_API_BASE_URL || '';
+  if (auth.status !== 'authenticated') return <AuthPage error={auth.error} onSubmit={() => window.location.assign(import.meta.env.VITE_GOOGLE_SIGN_IN_URL || `${apiBase}/api/auth/google/start`)} />;
+  return <AppShell view={ui.view} activeStep={ui.activeStep} onNavigate={navigate} onStepChange={switchStep} onSignOut={() => window.location.assign(import.meta.env.VITE_SIGN_OUT_URL || `${apiBase}/api/auth/logout`)} user={auth.user}>
     {ui.view === 'dashboard' && <Dashboard user={auth.user} projects={auth.projects} onNewProject={startNewProject} onOpenProject={showProject} onBrowseProjects={() => navigate('projects')} />}
     {ui.view === 'project' && <main ref={mainRef} className="studio-main">
       {project.status === 'idle' && <div id="project-form"><ProjectUploader onSubmit={(payload) => dispatch(submitProject(payload))} /></div>}

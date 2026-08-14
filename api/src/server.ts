@@ -9,15 +9,19 @@ import { FirestoreProjectRepository, type ProjectRepository } from './repository
 import { GcsAssetStorage, type AssetStorage } from './storage.js';
 import { HttpOrchestrator, type Orchestrator } from './orchestrator.js';
 import { createYouTubeConnections, type YouTubeConnections } from './youtubeConnections.js';
+import { createGoogleSignIn, type GoogleSignIn } from './googleSignIn.js';
 
-type Dependencies = { config: Config; repository: ProjectRepository; storage: AssetStorage; orchestrator: Orchestrator; youtube?: YouTubeConnections };
+type Dependencies = { config: Config; repository: ProjectRepository; storage: AssetStorage; orchestrator: Orchestrator; youtube?: YouTubeConnections; googleSignIn?: GoogleSignIn };
 const statusMessage: Record<Project['status'], string> = { created: 'Project created', uploading: 'Uploading footage', uploaded: 'Footage uploaded', analyzing: 'Gemini is analyzing the footage', scoring: 'Lyria is generating the score', querying_insights: 'Querying creator retention through ClickHouse MCP', waiting_for_service: 'Waiting for ClickHouse MCP configuration', editing: 'Building the enhanced edit timeline', rendering: 'Rendering the enhanced final cut', complete: 'Final cut and report ready', failed: 'Processing failed' };
 const safeError = (message: string) => message.replace(/(token|secret|password|authorization)=?\S*/gi, '$1=[redacted]').slice(0, 500);
 
 export function createApp(deps: Dependencies) {
-  const { config, repository, storage, orchestrator } = deps; const youtube = deps.youtube || createYouTubeConnections(config);
-  const app = express(); app.use(cors({ origin: config.CORS_ORIGIN, credentials: true })); app.use(authMiddleware());
+  const { config, repository, storage, orchestrator } = deps; const youtube = deps.youtube || createYouTubeConnections(config); const googleSignIn = deps.googleSignIn || createGoogleSignIn(config);
+  const app = express(); app.use(cors({ origin: config.CORS_ORIGIN, credentials: true })); app.use(authMiddleware(googleSignIn));
   app.get('/api/health', (_req, res) => res.json({ ok: true, service: 'dailies-api', cloudBacked: true }));
+  app.get('/api/auth/google/start', (_req, res) => googleSignIn.configured ? googleSignIn.start(res) : res.status(503).json({ error: { code: 'GOOGLE_SIGN_IN_NOT_CONFIGURED', message: 'Google sign-in is not configured for this deployment.', retryable: false } }));
+  app.get('/api/auth/google/callback', async (req, res) => { try { await googleSignIn.callback(req, res); } catch (error: any) { console.error(JSON.stringify({ level: 'error', path: req.path, message: safeError(error?.message || 'Google sign-in failed') })); res.redirect(`${config.CORS_ORIGIN}/studio/?auth=error`); } });
+  app.get('/api/auth/logout', (_req, res) => googleSignIn.signOut(res));
   app.use(express.json({ limit: '1mb' }));
   app.get('/api/me', requireAuth, async (req, res, next) => { try { res.json({ user: req.user, projects: await repository.listForOwner(req.user!.id) }); } catch (e) { next(e); } });
   app.get('/api/youtube/status', requireAuth, async (req, res, next) => { try { res.json(await youtube.status(req.user!.id)); } catch (e) { next(e); } });

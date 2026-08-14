@@ -23,10 +23,11 @@ export class GcsAssetStorage implements AssetStorage {
   async readStream(path: string, range?: { start: number; end: number }) { return (await this.file(path)).createReadStream(range); }
   async signedReadUrl(path: string) { const expires = Date.now() + 15 * 60_000; const [url] = await (await this.file(path)).getSignedUrl({ action: 'read', expires }); return { url, expiresAt: new Date(expires).toISOString() }; }
 }
+// Test double for AssetStorage; not used by the production bootstrap, which always talks to GCS.
 export class MemoryAssetStorage implements AssetStorage {
   values = new Map<string, Buffer>();
-  async put(path: string, data: Buffer) { this.values.set(path, data); return { sizeBytes: data.byteLength }; }
-  async signedWriteUrl(): Promise<{ url: string; expiresAt: string }> { throw new Error('Signed writes require Cloud Storage'); }
+  async put(path: string, data: Buffer, _contentType: string) { this.values.set(path, data); return { sizeBytes: data.byteLength }; }
+  async signedWriteUrl(path: string): Promise<{ url: string; expiresAt: string }> { return { url: `memory://${path}`, expiresAt: new Date(Date.now() + 86_400_000).toISOString() }; }
   async size(path: string) { const value = this.values.get(path); if (!value) throw new Error('ASSET_NOT_FOUND'); return value.byteLength; }
   async read(path: string) { const value = this.values.get(path); if (!value) throw new Error('ASSET_NOT_FOUND'); return value; }
   async readStream(path: string, range?: { start: number; end: number }) { const value = await this.read(path); return Readable.from(range ? value.subarray(range.start, range.end + 1) : value); }
