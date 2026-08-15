@@ -9,7 +9,7 @@ import { FirestoreProjectRepository, type ProjectRepository } from './repository
 import { GcsAssetStorage, type AssetStorage } from './storage.js';
 import { HttpOrchestrator, type Orchestrator } from './orchestrator.js';
 import { createYouTubeConnections, type YouTubeConnections } from './youtubeConnections.js';
-import { createGoogleSignIn, type GoogleSignIn } from './googleSignIn.js';
+import { createGoogleSignIn, isGoogleSignInState, type GoogleSignIn } from './googleSignIn.js';
 
 type Dependencies = { config: Config; repository: ProjectRepository; storage: AssetStorage; orchestrator: Orchestrator; youtube?: YouTubeConnections; googleSignIn?: GoogleSignIn };
 const statusMessage: Record<Project['status'], string> = { created: 'Project created', uploading: 'Uploading footage', uploaded: 'Footage uploaded', analyzing: 'Gemini is analyzing the footage', scoring: 'Lyria is generating the score', querying_insights: 'Querying creator retention through ClickHouse MCP', waiting_for_service: 'Waiting for ClickHouse MCP configuration', editing: 'Building the enhanced edit timeline', rendering: 'Rendering the enhanced final cut', complete: 'Final cut and report ready', failed: 'Processing failed' };
@@ -26,7 +26,12 @@ export function createApp(deps: Dependencies) {
   app.get('/api/me', requireAuth, async (req, res, next) => { try { res.json({ user: req.user, projects: await repository.listForOwner(req.user!.id) }); } catch (e) { next(e); } });
   app.get('/api/youtube/status', requireAuth, async (req, res, next) => { try { res.json(await youtube.status(req.user!.id)); } catch (e) { next(e); } });
   app.post('/api/youtube/connect', requireAuth, async (req, res, next) => { try { const status = await youtube.status(req.user!.id); if (!status.configured) return res.status(503).json({ error: { code: 'YOUTUBE_OAUTH_NOT_CONFIGURED', message: 'YouTube OAuth is not configured for this deployment.', retryable: false } }); res.json({ url: await youtube.begin(req.user!.id) }); } catch (e) { next(e); } });
-  app.get('/api/youtube/callback', async (req, res) => { try { const state = String(req.query.state || ''); const code = String(req.query.code || ''); if (!state || !code) throw new Error('Google did not return the required authorization details'); await youtube.finish(state, code); res.redirect(youtube.successUrl('connected')); } catch (error: any) { console.error(JSON.stringify({ level: 'error', path: req.path, message: safeError(error?.message || 'YouTube authorization failed') })); res.redirect(youtube.successUrl('error')); } });
+  app.get('/api/youtube/callback', async (req, res) => { try {
+    // GOOGLE_SIGN_IN_REDIRECT_URI may point here when it reuses the YouTube OAuth client's
+    // already-registered redirect URI instead of a dedicated one; route by state prefix.
+    if (isGoogleSignInState(String(req.query.state || ''))) { await googleSignIn.callback(req, res); return; }
+    const state = String(req.query.state || ''); const code = String(req.query.code || ''); if (!state || !code) throw new Error('Google did not return the required authorization details'); await youtube.finish(state, code); res.redirect(youtube.successUrl('connected'));
+  } catch (error: any) { console.error(JSON.stringify({ level: 'error', path: req.path, message: safeError(error?.message || 'YouTube authorization failed') })); res.redirect(youtube.successUrl('error')); } });
   app.post('/api/youtube/sync', requireAuth, async (req, res, next) => { try { res.json(await youtube.sync(req.user!.id)); } catch (e) { next(e); } });
   app.delete('/api/youtube/connection', requireAuth, async (req, res, next) => { try { await youtube.disconnect(req.user!.id); res.status(204).end(); } catch (e) { next(e); } });
   app.post('/api/projects', requireAuth, async (req, res, next) => { try {

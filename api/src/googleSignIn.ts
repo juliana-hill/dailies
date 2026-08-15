@@ -10,8 +10,15 @@ import type { Config } from './config.js';
 // browser a session it signed itself. authMiddleware trusts that session, not the client.
 
 const STATE_COOKIE = 'dailies_oauth_state';
+// Marks a state value as belonging to this flow when GOOGLE_SIGN_IN_REDIRECT_URI is set to an
+// already-registered redirect URI shared with another OAuth flow (see server.ts's callback route).
+const STATE_PREFIX = 'signin:';
 const SESSION_COOKIE = 'dailies_session';
 const SESSION_TTL_SECONDS = 7 * 24 * 60 * 60;
+
+// server.ts uses this to route a shared callback route (e.g. an existing YouTube OAuth
+// redirect URI reused for sign-in) between this flow and another OAuth flow on the same path.
+export const isGoogleSignInState = (state: string) => state.startsWith(STATE_PREFIX);
 
 export interface GoogleSignIn {
   configured: boolean;
@@ -44,8 +51,8 @@ export class OAuthGoogleSignIn implements GoogleSignIn {
   }
 
   start(res: Response) {
-    const state = randomUUID();
-    res.cookie(STATE_COOKIE, state, { httpOnly: true, secure: this.cookieSecure, sameSite: 'lax', maxAge: 10 * 60_000, path: '/api/auth/google' });
+    const state = STATE_PREFIX + randomUUID();
+    res.cookie(STATE_COOKIE, state, { httpOnly: true, secure: this.cookieSecure, sameSite: 'lax', maxAge: 10 * 60_000, path: '/api' });
     const url = this.oauth().generateAuthUrl({ scope: ['openid', 'email', 'profile'], state, prompt: 'select_account' });
     res.redirect(url);
   }
@@ -54,7 +61,7 @@ export class OAuthGoogleSignIn implements GoogleSignIn {
     const expectedState = readCookie(req, STATE_COOKIE);
     const state = String(req.query.state || '');
     const code = String(req.query.code || '');
-    res.clearCookie(STATE_COOKIE, { path: '/api/auth/google' });
+    res.clearCookie(STATE_COOKIE, { path: '/api' });
     if (!expectedState || !state || !code || !safeEqual(expectedState, state)) throw new Error('The Google sign-in request is invalid or expired');
     const oauth = this.oauth();
     const { tokens } = await oauth.getToken(code);
