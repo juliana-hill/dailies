@@ -61,8 +61,7 @@ export function buildFilterComplex(plan: EditPlan, cues: MusicCue[] = [], editor
     }
     filters.push(`[${inputIndex}:v]scale='min(480,iw)':-1,format=rgba,fade=t=in:st=0:d=0.18:alpha=1,fade=t=out:st=${number(Math.max(.18, end - start - .22))}:d=0.22:alpha=1,setpts=PTS+${number(start)}/TB[${overlay}]`);
     const enterEnd = Math.min(end, start + .24); const exitStart = Math.max(start, end - .24);
-    const x = `if(lt(t,${number(enterEnd)}),W-(w+48)*(t-${number(start)})/${number(Math.max(.01, enterEnd - start))},if(gt(t,${number(exitStart)}),W-w-48+(w+48)*(t-${number(exitStart)})/${number(Math.max(.01, end - exitStart))},W-w-48))`;
-    const y = cue.effectStyle === 'comic_bubble' ? `48+8*sin((t-${number(start)})*8)` : '48';
+    const { x, y } = stickerPosition(cue.position, cue.effectStyle === 'comic_bubble', start, enterEnd, exitStart, end);
     filters.push(`[${videoLabel}][${overlay}]overlay=x='${x}':y='${y}':eof_action=pass:enable='between(t,${number(start)},${number(end)})'[${next}]`); videoLabel = next;
   });
   filters.push(`[${videoLabel}]null[vout]`);
@@ -120,6 +119,21 @@ const effectiveCues = (soundtrack: SoundtrackResult, durationSeconds: number): M
 const dbFactor = (gainDb: number) => gainDb <= -90 ? 0 : 10 ** (gainDb / 20);
 const hasVisualTreatment = (value?: { brightness: number; contrast: number; saturation: number; temperature: number }) => Boolean(value && (value.brightness || value.contrast || value.saturation || value.temperature));
 const number = (value: number) => Number(value.toFixed(5));
+// Rule-of-thirds resting zones for a sticker overlay, with a slide-in/out from the nearest off-
+// screen edge (center holds still and relies on its own alpha fade instead). Every sticker used to
+// hard-code the top-right corner; this generalizes that same slide formula to the chosen zone.
+function stickerPosition(position: string | undefined, comicBubble: boolean, start: number, enterEnd: number, exitStart: number, end: number) {
+  const zone = position || 'top-right';
+  const restY = zone === 'bottom-left' || zone === 'bottom-right' ? 'H-h-48' : zone === 'center' ? '(H-h)/2' : '48';
+  const y = comicBubble ? `${restY}+8*sin((t-${number(start)})*8)` : restY;
+  if (zone === 'center') return { x: '(W-w)/2', y };
+  const restX = zone === 'top-left' || zone === 'bottom-left' ? '48' : 'W-w-48';
+  const offScreen = zone === 'top-left' || zone === 'bottom-left' ? '-w' : 'W';
+  const enterProgress = `(t-${number(start)})/${number(Math.max(.01, enterEnd - start))}`;
+  const exitProgress = `(t-${number(exitStart)})/${number(Math.max(.01, end - exitStart))}`;
+  const x = `if(lt(t,${number(enterEnd)}),${offScreen}+(${restX}-(${offScreen}))*${enterProgress},if(gt(t,${number(exitStart)}),${restX}+(${offScreen}-(${restX}))*${exitProgress},${restX}))`;
+  return { x, y };
+}
 const objectKey = (uri: string, bucket: string) => { const prefix = `gs://${bucket}/`; if (!uri.startsWith(prefix)) throw new Error('Source video must use the configured GCS bucket'); return decodeURIComponent(uri.slice(prefix.length)); };
 const hasOutput = async (path: string) => { try { return (await stat(path)).size > 0; } catch { return false; } };
 const run = (command: string, args: string[]) => new Promise<void>((resolve, reject) => { const child = spawn(command, args, { stdio: ['ignore', 'ignore', 'pipe'] }); let stderr = ''; child.stderr.on('data', (chunk) => { stderr = `${stderr}${chunk}`.slice(-16_000); }); child.on('error', reject); child.on('close', (code) => { if (code === 0) resolve(); else { const diagnostic = stderr.split('\n').map((line) => line.trim()).filter(Boolean).slice(-10).join(' | '); reject(new Error(`FFmpeg render failed (${code}): ${diagnostic.slice(-1400)}`)); } }); });

@@ -74,6 +74,11 @@ export const editorialAudioCueSchema = z.object({
   dialoguePolicy: z.enum(['no_dialogue', 'duck_under_dialogue', 'replace_source_audio']).default('no_dialogue'),
   visualCompanion: z.string().default(''),
   visualMode: z.enum(['sticker', 'full_frame']).optional(),
+  // Rule-of-thirds zone for a sticker overlay's resting position. Ignored for full_frame (which
+  // always fills the frame). Optional (not .default()) so existing object literals/fixtures built
+  // before this field existed stay valid; ffmpegRenderer's stickerPosition falls back to the same
+  // top-right corner every sticker used when this is absent.
+  position: z.enum(['top-left', 'top-right', 'bottom-left', 'bottom-right', 'center']).optional(),
   effectStyle: z.enum(['none', 'soft_pop', 'warm_chime', 'celebration_swell', 'comic_bubble']).optional(),
   calloutText: z.string().max(24).optional(),
   generationPrompt: z.string().min(20).optional(),
