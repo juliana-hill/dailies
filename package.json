@@ -16,7 +16,12 @@
     "dev:ingestion": "npm --workspace ingestion run dev",
     "build": "npm --workspace shared run build && npm --workspace api run build && npm --workspace agents run build && npm --workspace ingestion run build && npm --workspace frontend run build",
     "test": "npm --workspace shared run build && npm run test --workspaces --if-present",
-    "audit:ai-policy": "node scripts/audit-ai-dependencies.mjs"
+    "audit:ai-policy": "node scripts/audit-ai-dependencies.mjs",
+    "up": "docker compose up -d",
+    "down": "docker compose down",
+    "logs": "docker compose logs -f",
+    "compose:build": "docker compose build",
+    "restart": "docker compose down -v && docker compose build --no-cache && docker compose up -d"
   },
   "engines": {
     "node": ">=20"
