@@ -5,10 +5,11 @@ import { editorialAudioCueSchema, editorialReviewSchema, finalCutResultSchema, g
 import { analyzeVideo } from './analysisAgent.js';
 import { createEditPlan } from './editingAgent.js';
 import { EMOJI_LIBRARY, LIBRARY_GCS_PREFIX, SFX_LIBRARY } from './library.js';
+import { renderCuePreview } from './ffmpegRenderer.js';
 import { generateScore } from './scoreAgent.js';
 import { queryRetention, recommendationFromRows } from './retentionAgent.js';
 import { renderFinalCut } from './renderAgent.js';
-import { reviewRenderedDraft } from './reviewAgent.js';
+import { reviewCuePreview, reviewRenderedDraft } from './reviewAgent.js';
 import type { JobInput, JobState } from './orchestrator.js';
 
 const APP_NAME = 'dailies_editorial_agent';
@@ -161,12 +162,15 @@ export async function runEditorialAgent(input: JobInput, update: (state: JobStat
     return { ok: true, cueId, assetId: asset.id, requiresVisual: Boolean(visualGenerationPrompt?.trim()) };
   }});
 
-  const validateVisualAsset = new FunctionTool({ name: 'validate_visual_asset', description: 'Validate one generated visual asset against the cue requirement. If missing or unsuitable, return a diagnosis so the agent can revise and call generate_visual_asset again.', parameters: visualValidationSchema, execute: async (toolInput) => { const { cueId } = toolInput as { cueId: string };
+  const validateVisualAsset = new FunctionTool({ name: 'validate_visual_asset', description: 'Render a short real preview of this one cue composited into the actual footage and watch it — not just checking the asset file exists. Approve, or get a concrete diagnosis to fix and call generate_visual_asset/select_library_emoji again for the same cue.', parameters: visualValidationSchema, execute: async (toolInput) => { const { cueId } = toolInput as { cueId: string };
     const cue = progress.soundtrack?.cues.find((item) => item.id === cueId);
     if (!cue) return { ok: false, approved: false, error: `Unknown soundtrack cue ${cueId}` };
     if (!cue.visualGenerationPrompt?.trim()) return { ok: true, approved: true, cueId, skipped: true };
     if (!cue.visualAsset) return { ok: true, approved: false, cueId, diagnosis: 'No visual asset was produced. Revise the prompt and call generate_visual_asset again.' };
-    return { ok: true, approved: true, cueId, assetId: cue.visualAsset.id, generationModel: cue.visualAsset.generationModel, diagnosis: 'Asset exists and is checkpointed for rendering.' };
+    const preview = await renderCuePreview({ projectId: input.projectId, ownerId: input.ownerId, sourceUri: input.videoUri, cue });
+    const review = await reviewCuePreview({ previewUri: preview.uri, purpose: cue.purpose, visualPrompt: cue.visualGenerationPrompt });
+    if (!review.approved) return { ok: true, approved: false, cueId, diagnosis: review.diagnosis };
+    return { ok: true, approved: true, cueId, assetId: cue.visualAsset.id, generationModel: cue.visualAsset.generationModel, diagnosis: review.diagnosis };
   }});
 
   const render = new FunctionTool({ name: 'render_edit_draft', description: 'Execute the current agent-authored edit plan with FFmpeg/Google Cloud and persist a distinct cloud draft. Never call without a current plan and generated assets.', parameters: reasonSchema, execute: async () => {

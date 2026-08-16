@@ -15,6 +15,19 @@ Return a strict review. decision=pass only when there are no blocking issues and
   return editorialReviewSchema.parse({ ...JSON.parse(response.text), iteration: input.iteration });
 }
 
+// Checks one cue in isolation against an actual rendered preview clip — not just "does a file
+// exist" — so a bad sticker (wrong position, unsynced, covering the subject, wrong tone) is caught
+// and fixed while adding that one cue, instead of only surfacing after a full expensive draft
+// render puts everything together at once.
+export async function reviewCuePreview(input: { previewUri: string; purpose: string; visualPrompt: string }): Promise<{ approved: boolean; diagnosis: string }> {
+  const ai = new GoogleGenAI({ vertexai: true, project: required('GCP_PROJECT_ID'), location: process.env.VERTEX_LOCATION || 'global' });
+  const prompt = `Watch this few-second preview clip: the real source footage with one candidate editorial visual composited on top, at its intended moment. Intended purpose: ${input.purpose}. What it was asked to look like: ${input.visualPrompt || '(audio-only cue; no visual expected)'}.
+Approve only if the visual genuinely reads well here: correctly synced to this exact moment, positioned so it doesn't cover the speaker's face, hands, or the on-screen subject, legible at this size, and tonally right for what's actually happening in the footage. Reject with a concrete, actionable diagnosis otherwise — describe exactly what's wrong (wrong position, bad timing, illegible, tonally mismatched, etc.) so the next attempt can fix it.`;
+  const response = await ai.models.generateContent({ model: process.env.GEMINI_REVIEW_MODEL || process.env.GEMINI_MODEL || 'gemini-3-flash-preview', contents: [{ role: 'user', parts: [{ fileData: { fileUri: input.previewUri, mimeType: 'video/mp4' } }, { text: prompt }] }], config: { responseMimeType: 'application/json', responseJsonSchema: cuePreviewJsonSchema } });
+  if (!response.text) throw new Error('Gemini cue-preview reviewer returned no structured response');
+  return JSON.parse(response.text);
+}
+const cuePreviewJsonSchema = { type: 'object', additionalProperties: false, required: ['approved', 'diagnosis'], properties: { approved: { type: 'boolean' }, diagnosis: { type: 'string' } } };
 const issueJsonSchema = { type: 'object', additionalProperties: false, required: ['category', 'startSeconds', 'endSeconds', 'severity', 'diagnosis', 'requiredChange'], properties: { category: { type: 'string', enum: ['hook', 'pacing', 'clarity', 'visual', 'audio', 'continuity', 'ending'] }, startSeconds: { type: 'number', minimum: 0 }, endSeconds: { type: 'number', exclusiveMinimum: 0 }, severity: { type: 'string', enum: ['minor', 'major', 'blocking'] }, diagnosis: { type: 'string' }, requiredChange: { type: 'string' } } };
 const scoreJsonSchema = { type: 'object', additionalProperties: false, required: ['hook', 'pacing', 'clarity', 'visualQuality', 'audioQuality', 'total', 'rationale'], properties: { hook: { type: 'number', minimum: 0, maximum: 100 }, pacing: { type: 'number', minimum: 0, maximum: 100 }, clarity: { type: 'number', minimum: 0, maximum: 100 }, visualQuality: { type: 'number', minimum: 0, maximum: 100 }, audioQuality: { type: 'number', minimum: 0, maximum: 100 }, total: { type: 'number', minimum: 0, maximum: 100 }, rationale: { type: 'string' } } };
 const reviewJsonSchema = { type: 'object', additionalProperties: false, required: ['iteration', 'decision', 'score', 'summary', 'issues'], properties: { iteration: { type: 'number', minimum: 1 }, decision: { type: 'string', enum: ['pass', 'revise'] }, score: scoreJsonSchema, summary: { type: 'string' }, issues: { type: 'array', items: issueJsonSchema } } };
