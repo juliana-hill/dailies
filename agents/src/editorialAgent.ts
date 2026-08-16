@@ -4,6 +4,7 @@ import { Storage } from '@google-cloud/storage';
 import { editorialReviewSchema, finalCutResultSchema, type CompleteProjectReport, type DraftHistoryEntry, type Project, type ProjectStatus } from '@dailies/shared';
 import { analyzeVideo } from './analysisAgent.js';
 import { createEditPlan } from './editingAgent.js';
+import { EMOJI_LIBRARY, LIBRARY_GCS_PREFIX, SFX_LIBRARY } from './library.js';
 import { generateScore } from './scoreAgent.js';
 import { queryRetention, recommendationFromRows } from './retentionAgent.js';
 import { renderFinalCut } from './renderAgent.js';
@@ -120,6 +121,29 @@ export async function runEditorialAgent(input: JobInput, update: (state: JobStat
     }
   }});
 
+  const selectLibraryEmoji = new FunctionTool({ name: 'select_library_emoji', description: `Attach a pre-made emoji image from the fixed asset library to a cue instead of generating a new one with generate_visual_asset — faster and more reliable when a library entry genuinely fits. Only pick an entry whose emoji actually matches the cue's specific moment; call generate_visual_asset instead when nothing in the library fits. Library (id: emoji): ${EMOJI_LIBRARY.map((item) => `${item.id}: ${item.emoji}`).join(', ')}`, parameters: librarySelectionSchema, execute: async (toolInput) => { const { cueId, libraryId } = toolInput as { cueId: string; libraryId: string };
+    if (!progress.analysis || !progress.soundtrack) return { ok: false, requiredNext: 'generate_editorial_assets' };
+    const cue = progress.soundtrack.cues.find((item) => item.id === cueId); if (!cue) return { ok: false, error: `Unknown cue ${cueId}` };
+    if (!cue.visualGenerationPrompt?.trim()) return { ok: true, approved: true, skipped: true, cueId };
+    if (cue.visualAsset) return { ok: true, approved: true, cueId, assetId: cue.visualAsset.id, reusedDurableAsset: true };
+    const entry = EMOJI_LIBRARY.find((item) => item.id === libraryId); if (!entry) return { ok: false, error: `Unknown library emoji id ${libraryId}` };
+    const visualAsset = await copyLibraryAsset(input.ownerId, input.projectId, `emoji/${entry.fileName}`, `library_emoji_${safe(cueId)}`, entry.fileName, 'image/png', 'overlay');
+    const soundtrack = { ...progress.soundtrack, cues: progress.soundtrack.cues.map((item) => item.id === cueId ? { ...item, visualAsset, visualPrompt: `Library emoji: ${entry.emoji} ${entry.label}` } : item) };
+    await checkpoint('editing', { soundtrack }, `Attached library emoji ${entry.emoji} (${entry.label}) to ${cueId} instead of generating a new visual.`);
+    return { ok: true, approved: true, cueId, assetId: visualAsset.id };
+  }});
+
+  const selectLibrarySfx = new FunctionTool({ name: 'select_library_sfx', description: `Replace a pop/laugh_track/sting cue's generated audio with a pre-made stinger from the fixed library — crisper and more reliable than a generated one-shot. Only use an entry whose character genuinely matches the cue and whose type matches the cue's own type; leave the generated audio in place when nothing fits. Call this after generate_editorial_assets has produced the cue. Library (id: type, seconds, description): ${SFX_LIBRARY.map((item) => `${item.id}: ${item.cueType}, ${item.durationSeconds}s, ${item.label}`).join(', ')}`, parameters: librarySelectionSchema, execute: async (toolInput) => { const { cueId, libraryId } = toolInput as { cueId: string; libraryId: string };
+    if (!progress.analysis || !progress.soundtrack) return { ok: false, requiredNext: 'generate_editorial_assets' };
+    const cue = progress.soundtrack.cues.find((item) => item.id === cueId); if (!cue) return { ok: false, error: `Unknown cue ${cueId}` };
+    const entry = SFX_LIBRARY.find((item) => item.id === libraryId); if (!entry) return { ok: false, error: `Unknown library sfx id ${libraryId}` };
+    if (entry.cueType !== cue.type) return { ok: false, error: `Library entry ${libraryId} is type ${entry.cueType}, but cue ${cueId} is type ${cue.type}` };
+    const asset = await copyLibraryAsset(input.ownerId, input.projectId, `sfx/${entry.fileName}`, `library_sfx_${safe(cueId)}`, entry.fileName, 'audio/mpeg', 'soundtrack');
+    const soundtrack = { ...progress.soundtrack, cues: progress.soundtrack.cues.map((item) => item.id === cueId ? { ...item, asset, durationSeconds: entry.durationSeconds, sourceStartSeconds: undefined, sourceEndSeconds: undefined, prompt: `Library sound effect: ${entry.label}` } : item) };
+    await checkpoint('editing', { soundtrack }, `Replaced generated audio for ${cueId} with library sound effect "${entry.label}".`);
+    return { ok: true, cueId, assetId: asset.id };
+  }});
+
   const validateVisualAsset = new FunctionTool({ name: 'validate_visual_asset', description: 'Validate one generated visual asset against the cue requirement. If missing or unsuitable, return a diagnosis so the agent can revise and call generate_visual_asset again.', parameters: visualValidationSchema, execute: async (toolInput) => { const { cueId } = toolInput as { cueId: string };
     const cue = progress.soundtrack?.cues.find((item) => item.id === cueId);
     if (!cue) return { ok: false, approved: false, error: `Unknown soundtrack cue ${cueId}` };
@@ -179,11 +203,11 @@ export async function runEditorialAgent(input: JobInput, update: (state: JobStat
     description: 'Autonomous senior video editor that diagnoses, edits, renders, watches, and revises creator videos.',
     model: process.env.GEMINI_AGENT_MODEL || process.env.GEMINI_MODEL || 'gemini-3-flash-preview',
     instruction: `You are the senior editorial agent responsible for the finished Dailies video—not a passive pipeline router. Your goal is a pithy, engaging YouTube cut that materially improves the source while preserving truth, personality, and dialogue continuity.
-Use tools and inspect their results. Required lifecycle: diagnose the entire source; load optional creator evidence; design an edit; generate the justified soundtrack; call generate_visual_asset and validate_visual_asset for every justified visual cue, revising prompts and looping until each is approved; render a cloud draft; watch that rendered draft; then either pass it or revise and repeat. Never claim completion before inspect_rendered_draft returns decision=pass. A successful render is only a draft. When review says revise, call design_or_revise_edit using that critique, render a distinct new draft, and inspect it again. You have at most ${MAX_DRAFTS} drafts; prioritize all blocking and major issues.
+Use tools and inspect their results. Required lifecycle: diagnose the entire source; load optional creator evidence; design an edit; generate the justified soundtrack; for every justified visual cue call either select_library_emoji (when a library entry genuinely matches) or generate_visual_asset followed by validate_visual_asset, revising and looping until each is approved; optionally call select_library_sfx to swap a pop/laugh_track/sting cue's generated audio for a crisper pre-made one when a library entry genuinely fits; render a cloud draft; watch that rendered draft; then either pass it or revise and repeat. Prefer the fixed library over generation whenever an entry is a genuine match — it is faster and more reliable — but never force a mismatched library asset onto a cue merely to skip generation. Never claim completion before inspect_rendered_draft returns decision=pass. A successful render is only a draft. When review says revise, call design_or_revise_edit using that critique, render a distinct new draft, and inspect it again. You have at most ${MAX_DRAFTS} drafts; prioritize all blocking and major issues.
 Editorial rules: maximize story and entertainment value per second without imposing a duration ratio. Protect the main story, personality, useful context, evidence, and payoff. Remove diagnosed repetition, dead talking, mildly unrelated tangents, coughs, sniffles, stutters, false starts, verbal resets, and routine actions that do not earn their time. A long source may remain long when the footage is valuable. Clean dialogue is the default; retain 1x narration at full source level; mute source only inside deliberate music-led intro/outro, montage, or fast-forward intervals; never use an unexplained continuous music bed. Use contextual intro/outro visuals, timed product/feature cards, emoji/reaction accents, and paired sound effects where the material earns them. Apply consistent white-noise cleanup when diagnosed. Creator analytics are evidence, never a requirement and never a substitute for watching the source and draft.
 Process footage requires format-aware judgment. In a tutorial or how-it-is-made video, preserve the steps and explanatory narration at a learnable pace. In a story, haul, review, or reveal-led video, preserve meaningful before/result anchors but an otherwise repetitive non-instructional process may become a music-led montage. A low-change, single-setting montage should normally produce about 5-10 seconds of final footage; allow more only when distinct visual beats, scenery changes, or a setup-to-result mini-arc keep earning attention. Choose the slowest speed that reaches that earned duration and keeps the motion readable—often 10× is enough; 100× is only the ceiling for rare, exceptionally repetitive passages. Delete it when neither the process nor outcome earns time.
 Current durable state: ${JSON.stringify(progressSummary(progress))}`,
-    tools: [diagnose, creatorEvidence, plan, assets, generateVisualAsset, validateVisualAsset, render, review],
+    tools: [diagnose, creatorEvidence, plan, assets, generateVisualAsset, selectLibraryEmoji, selectLibrarySfx, validateVisualAsset, render, review],
   });
   const sessionService = new InMemorySessionService();
   await sessionService.createSession({ appName: APP_NAME, userId: input.ownerId, sessionId: input.projectId, state: { projectId: input.projectId, editorialIteration: iteration } });
@@ -206,6 +230,7 @@ Current durable state: ${JSON.stringify(progressSummary(progress))}`,
 const reasonSchema = { type: Type.OBJECT, required: ['reason'], properties: { reason: { type: Type.STRING, description: 'Why this tool is the correct next editorial action.' } } };
 const visualAssetSchema = { type: Type.OBJECT, required: ['cueId', 'reason'], properties: { cueId: { type: Type.STRING, description: 'The exact diagnosed cue ID to generate.' }, reason: { type: Type.STRING, description: 'The agent diagnosis and revised image-generation direction.' } } };
 const visualValidationSchema = { type: Type.OBJECT, required: ['cueId'], properties: { cueId: { type: Type.STRING, description: 'The exact cue ID to validate.' } } };
+const librarySelectionSchema = { type: Type.OBJECT, required: ['cueId', 'libraryId', 'reason'], properties: { cueId: { type: Type.STRING, description: 'The exact cue ID to attach this library asset to.' }, libraryId: { type: Type.STRING, description: 'The exact library entry id.' }, reason: { type: Type.STRING, description: 'Why this specific library entry genuinely matches the cue.' } } };
 const progressSummary = (progress: NonNullable<Project['progress']>) => ({ hasAnalysis: Boolean(progress.analysis), hasCreatorEvidence: Boolean(progress.recommendation), hasAssets: Boolean(progress.soundtrack), hasEditPlan: Boolean(progress.editPlan), hasDraft: Boolean(progress.finalCut), reviewDecision: progress.editorialReview?.decision, editorialIteration: progress.editorialIteration || 0 });
 const visualCueIds = (progress: NonNullable<Project['progress']>) => (progress.soundtrack?.cues || []).filter((cue) => cue.visualGenerationPrompt?.trim() && !cue.visualAsset).map((cue) => cue.id);
 const bestDraft = (history?: DraftHistoryEntry[]): DraftHistoryEntry | undefined => history?.length ? history.reduce((best, entry) => entry.editorialReview.score.total > best.editorialReview.score.total ? entry : best) : undefined;
@@ -223,5 +248,17 @@ async function findLatestOrphanedRender(ownerId: string, projectId: string) {
   return { assetId: segments[segments.length - 2], fileName: 'enhanced-final-cut.mp4', sizeBytes: Number(latest.metadata.size || 0), createdAt: String(latest.metadata.timeCreated || new Date().toISOString()) };
 }
 const renderedUri = (input: JobInput, finalCut: NonNullable<Project['progress']>['finalCut']) => `gs://${required('GCS_BUCKET')}/${input.ownerId}/${input.projectId}/${finalCut!.asset.id}/${finalCut!.asset.fileName}`;
+const safe = (value: string) => value.replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 72);
+// Library assets live once under a shared, non-project GCS prefix (see library.ts). Selecting one
+// for a cue copies it into that project's own asset path — the same ownerId/projectId/assetId shape
+// every other asset already uses — so rendering, asset-serving, and everything downstream needs zero
+// changes to understand it; a selected library asset is indistinguishable from a generated one.
+async function copyLibraryAsset(ownerId: string, projectId: string, libraryRelativePath: string, assetId: string, fileName: string, mimeType: string, kind: 'overlay' | 'soundtrack') {
+  const bucket = new Storage({ projectId: required('GCP_PROJECT_ID') }).bucket(required('GCS_BUCKET'));
+  const destination = bucket.file(`${ownerId}/${projectId}/${assetId}/${fileName}`);
+  await bucket.file(`${LIBRARY_GCS_PREFIX}/${libraryRelativePath}`).copy(destination);
+  const [metadata] = await destination.getMetadata();
+  return { id: assetId, kind, fileName, mimeType, sizeBytes: Number(metadata.size || 0), generationModel: 'asset-library', createdAt: new Date().toISOString() };
+}
 const configureVertexEnvironment = () => { process.env.GOOGLE_GENAI_USE_VERTEXAI ||= 'true'; process.env.GOOGLE_CLOUD_PROJECT ||= required('GCP_PROJECT_ID'); process.env.GOOGLE_CLOUD_LOCATION ||= process.env.VERTEX_LOCATION || 'global'; };
 const required = (name: string) => { const value = process.env[name]; if (!value) throw new Error(`${name} is required`); return value; };
