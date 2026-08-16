@@ -13,7 +13,7 @@ export default function AppShell({ children, view, activeStep, onNavigate, onSte
       <nav className="desktop-nav" aria-label="Creator studio sections">
         {items.map(([id, label]) => <button key={id} className={(view === 'project' ? activeStep === id : view === id) ? 'nav-link is-active' : 'nav-link'} onClick={() => handleItem(id)}>{label}</button>)}
       </nav>
-      <div className="account-area"><span className="product-note">{user?.plan || 'Creator studio'}</span><button className="avatar-button" onClick={onSignOut} aria-label="Sign out" title="Sign out">{user?.initials || 'D'}</button></div>
+      <div className="account-area"><span className="avatar-button" aria-hidden="true">{user?.initials || 'D'}</span><button className="sign-out-link" onClick={onSignOut}>Sign out</button></div>
     </header>
     {children}
   </div>;

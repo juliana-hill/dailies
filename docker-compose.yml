@@ -1,0 +1,68 @@
+name: dailies
+
+# All four services read credentials and shared config from .env.local (gitignored) via
+# `env_file:`. Only values that must differ between the host and a container — a
+# container-mounted credentials path, service-to-service URLs on the compose network —
+# are set explicitly below, overriding whatever .env.local provides for host-process use.
+
+x-google-credentials: &google-credentials
+  GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/google-adc.json
+
+x-adc-volume: &adc-volume
+  - ${HOME}/.config/gcloud/application_default_credentials.json:/run/secrets/google-adc.json:ro
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    env_file: .env.local
+    environment:
+      <<: *google-credentials
+      NODE_ENV: development
+      PORT: "8080"
+      AGENT_SERVICE_URL: http://agents:8080
+      INGESTION_SERVICE_URL: http://ingestion:8080
+    ports:
+      - "8084:8080"
+    volumes: *adc-volume
+    depends_on: [agents, ingestion]
+
+  ingestion:
+    build:
+      context: .
+      dockerfile: ingestion/Dockerfile
+    env_file: .env.local
+    environment:
+      <<: *google-credentials
+      NODE_ENV: development
+      PORT: "8080"
+    ports:
+      - "8082:8080"
+    volumes: *adc-volume
+
+  agents:
+    build:
+      context: .
+      dockerfile: agents/Dockerfile
+    env_file: .env.local
+    environment:
+      <<: *google-credentials
+      NODE_ENV: development
+      PORT: "8080"
+      CLICKHOUSE_MCP_URL: http://ingestion:8080/mcp
+    ports:
+      - "8081:8080"
+    volumes: *adc-volume
+    depends_on: [ingestion]
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        # Browser-facing: must be the host-mapped API port, not the in-network service name.
+        VITE_API_BASE_URL: http://127.0.0.1:8084
+    ports:
+      - "5173:8080"
+    depends_on: [api]
