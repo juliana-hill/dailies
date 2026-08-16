@@ -116,7 +116,12 @@ export async function runEditorialAgent(input: JobInput, update: (state: JobStat
     await checkpoint('editing', {}, `Editorial agent is now watching rendered draft ${iteration} beside the original source.`);
     const editorialReview = await reviewRenderedDraft({ iteration, sourceUri: input.videoUri, sourceMimeType: input.mimeType || 'video/mp4', draftUri: renderedUri(input, progress.finalCut), analysis: progress.analysis, editPlan: progress.editPlan, recommendation: progress.recommendation });
     const majorIssues = editorialReview.issues.filter((issue) => issue.severity !== 'minor').length;
-    await checkpoint('editing', { editorialReview }, editorialReview.decision === 'pass' ? `Draft ${iteration} passed rendered-video review with a score of ${Math.round(editorialReview.score.total)}.` : `Draft ${iteration} needs revision: ${majorIssues} major/blocking issue${majorIssues === 1 ? '' : 's'} found. Agent will revise the edit.`);
+    // The prompt tells the reviewer decision='revise' should imply a major/blocking issue, but
+    // nothing enforces that on its structured output, so it can revise on minor issues or its own
+    // rationale alone. Don't claim a major-issue count of 0 as the reason for revision — fall back
+    // to the reviewer's own summary so the checkpoint message is never self-contradictory.
+    const reviseReason = majorIssues ? `${majorIssues} major/blocking issue${majorIssues === 1 ? '' : 's'} found` : editorialReview.summary || 'reviewer flagged remaining issues';
+    await checkpoint('editing', { editorialReview }, editorialReview.decision === 'pass' ? `Draft ${iteration} passed rendered-video review with a score of ${Math.round(editorialReview.score.total)}.` : `Draft ${iteration} needs revision: ${reviseReason}. Agent will revise the edit.`);
     return { ok: true, decision: editorialReview.decision, score: editorialReview.score, summary: editorialReview.summary, issues: editorialReview.issues, draftsRemaining: MAX_DRAFTS - iteration };
   }});
 
