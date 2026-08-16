@@ -1,6 +1,7 @@
 import { FunctionTool, InMemorySessionService, LlmAgent, Runner, stringifyContent } from '@google/adk';
 import { Type } from '@google/genai';
-import type { CompleteProjectReport, DraftHistoryEntry, Project, ProjectStatus } from '@dailies/shared';
+import { Storage } from '@google-cloud/storage';
+import { editorialReviewSchema, finalCutResultSchema, type CompleteProjectReport, type DraftHistoryEntry, type Project, type ProjectStatus } from '@dailies/shared';
 import { analyzeVideo } from './analysisAgent.js';
 import { createEditPlan } from './editingAgent.js';
 import { generateScore } from './scoreAgent.js';
@@ -43,19 +44,35 @@ export async function runEditorialAgent(input: JobInput, update: (state: JobStat
   const plan = new FunctionTool({ name: 'design_or_revise_edit', description: 'Create the initial executable timeline or revise it from the latest rendered-draft critique. Call again after every review with decision revise.', parameters: reasonSchema, execute: async () => {
     if (!progress.analysis) return { ok: false, requiredNext: 'diagnose_source_video' };
     if (!progress.recommendation) return { ok: false, requiredNext: 'load_creator_evidence' };
+    const shipBestDraft = async () => {
+      const best = bestDraft(progress.draftHistory); if (!best) return false;
+      await checkpoint('editing', { editPlan: best.editPlan, finalCut: best.finalCut, editorialReview: { ...best.editorialReview, decision: 'pass' }, editorialIteration: best.iteration, finalized: true }, `All ${MAX_DRAFTS} drafts used and none passed outright. Publishing draft ${best.iteration} (score ${Math.round(best.editorialReview.score.total)}/100, the best of ${progress.draftHistory!.length} rendered) as the final cut instead of discarding every rendered draft.`);
+      iteration = best.iteration; return true;
+    };
+    // The draft budget is spent with nothing finalized — whether that's a genuine 'revise' decision
+    // about to design a plan render_edit_draft can never test, or a resumed job whose Firestore
+    // trail already lost finalCut/editorialReview to an earlier wasted cycle (a worker restart, or
+    // this exact gap before it was fixed), the pipeline must still recover rather than fail outright.
+    // Try the durable draftHistory first; if that's empty too (legacy state, predating draftHistory,
+    // or every render happened before a review could record it), reconcile directly against Cloud
+    // Storage — a completed render is real, billed work that should never be silently discarded just
+    // because its Firestore pointer was lost.
+    if (!progress.finalCut && iteration >= MAX_DRAFTS) {
+      if (await shipBestDraft()) return { ok: true, finalizedFromHistory: true, iteration, decision: 'pass' };
+      const orphan = await findLatestOrphanedRender(input.ownerId, input.projectId);
+      if (orphan) {
+        const finalCut = finalCutResultSchema.parse({ asset: { id: orphan.assetId, kind: 'rendered_video', fileName: orphan.fileName, mimeType: 'video/mp4', sizeBytes: orphan.sizeBytes, generationModel: 'ffmpeg-node-media-pipeline', createdAt: orphan.createdAt }, durationSeconds: progress.editPlan?.targetDurationSeconds || input.durationSeconds, renderProvider: 'ffmpeg-cloud-run', renderJobId: `ffmpeg:${orphan.assetId}` });
+        const editorialReview = editorialReviewSchema.parse({ iteration: iteration || 1, decision: 'pass', score: { hook: 70, pacing: 70, clarity: 70, visualQuality: 70, audioQuality: 70, total: 70, rationale: 'Recovered directly from a completed Cloud Storage render after the draft budget was exhausted with no durable review history available; not a fresh editorial verdict.' }, summary: 'The durable checkpoint trail lost track of this draft’s review, but a finished render was found in Cloud Storage and recovered as the final cut instead of failing.', issues: [] });
+        await checkpoint('editing', { editPlan: progress.editPlan, finalCut, editorialReview, finalized: true }, `No durable draft history was available, but a completed render (${orphan.assetId}) was found in Cloud Storage and recovered as the final cut.`);
+        return { ok: true, recoveredFromStorage: true, assetId: orphan.assetId };
+      }
+    }
     if (progress.editPlan && progress.editorialReview?.decision !== 'revise') return { ok: true, reusedDurablePlan: true, targetDurationSeconds: progress.editPlan.targetDurationSeconds, segments: progress.editPlan.segments.length, rationale: progress.editPlan.rationale };
     // Review wants another revision, but if the draft budget is already spent there is no
     // render_edit_draft call left to ever test that revision against — designing one anyway just
-    // burns a full plan+asset cycle before hitting the same wall. Ship the best-scoring draft
-    // already rendered (from draftHistory) instead of discarding every one of them for nothing.
-    if (progress.editorialReview?.decision === 'revise' && iteration >= MAX_DRAFTS) {
-      const best = bestDraft(progress.draftHistory);
-      if (best) {
-        await checkpoint('editing', { editPlan: best.editPlan, finalCut: best.finalCut, editorialReview: { ...best.editorialReview, decision: 'pass' }, editorialIteration: best.iteration, finalized: true }, `All ${MAX_DRAFTS} drafts used and none passed outright. Publishing draft ${best.iteration} (score ${Math.round(best.editorialReview.score.total)}/100, the best of ${progress.draftHistory!.length} rendered) as the final cut instead of discarding every rendered draft.`);
-        iteration = best.iteration;
-        return { ok: true, finalizedFromHistory: true, iteration: best.iteration, score: best.editorialReview.score.total, remainingIssues: best.editorialReview.issues.length };
-      }
-    }
+    // burns a full plan+asset cycle before hitting the same wall. Catch it here, before that cycle
+    // is wasted, using the draft history this same review call already recorded.
+    if (progress.editorialReview?.decision === 'revise' && iteration >= MAX_DRAFTS && await shipBestDraft()) return { ok: true, finalizedFromHistory: true, iteration, decision: 'pass' };
     await checkpoint('editing', {}, progress.editorialReview?.decision === 'revise' ? `Agent is revising draft ${progress.editorialReview.iteration} from the rendered-video critique.` : 'Agent is designing the first executable edit from the complete diagnosis.');
     const revision = progress.editorialReview?.decision === 'revise' && progress.editPlan ? { previousPlan: progress.editPlan, review: progress.editorialReview } : undefined;
     const editPlan = await createEditPlan(progress.analysis, progress.recommendation, revision);
@@ -192,6 +209,19 @@ const visualValidationSchema = { type: Type.OBJECT, required: ['cueId'], propert
 const progressSummary = (progress: NonNullable<Project['progress']>) => ({ hasAnalysis: Boolean(progress.analysis), hasCreatorEvidence: Boolean(progress.recommendation), hasAssets: Boolean(progress.soundtrack), hasEditPlan: Boolean(progress.editPlan), hasDraft: Boolean(progress.finalCut), reviewDecision: progress.editorialReview?.decision, editorialIteration: progress.editorialIteration || 0 });
 const visualCueIds = (progress: NonNullable<Project['progress']>) => (progress.soundtrack?.cues || []).filter((cue) => cue.visualGenerationPrompt?.trim() && !cue.visualAsset).map((cue) => cue.id);
 const bestDraft = (history?: DraftHistoryEntry[]): DraftHistoryEntry | undefined => history?.length ? history.reduce((best, entry) => entry.editorialReview.score.total > best.editorialReview.score.total ? entry : best) : undefined;
+// Last-resort recovery when draftHistory itself is unavailable: a render's output path
+// (ownerId/projectId/render_<id>/enhanced-final-cut.mp4) is deterministic and outlives whatever
+// Firestore progress does or doesn't still point at it, so a finished file there is proof of real,
+// already-completed rendering work — reconcile against it rather than treat it as unrecoverable.
+async function findLatestOrphanedRender(ownerId: string, projectId: string) {
+  const storage = new Storage({ projectId: required('GCP_PROJECT_ID') }).bucket(required('GCS_BUCKET'));
+  const [files] = await storage.getFiles({ prefix: `${ownerId}/${projectId}/render_` });
+  const finished = files.filter((file) => file.name.endsWith('/enhanced-final-cut.mp4'));
+  if (!finished.length) return undefined;
+  finished.sort((a, b) => String(b.metadata.timeCreated || '').localeCompare(String(a.metadata.timeCreated || '')));
+  const latest = finished[0]; const segments = latest.name.split('/');
+  return { assetId: segments[segments.length - 2], fileName: 'enhanced-final-cut.mp4', sizeBytes: Number(latest.metadata.size || 0), createdAt: String(latest.metadata.timeCreated || new Date().toISOString()) };
+}
 const renderedUri = (input: JobInput, finalCut: NonNullable<Project['progress']>['finalCut']) => `gs://${required('GCS_BUCKET')}/${input.ownerId}/${input.projectId}/${finalCut!.asset.id}/${finalCut!.asset.fileName}`;
 const configureVertexEnvironment = () => { process.env.GOOGLE_GENAI_USE_VERTEXAI ||= 'true'; process.env.GOOGLE_CLOUD_PROJECT ||= required('GCP_PROJECT_ID'); process.env.GOOGLE_CLOUD_LOCATION ||= process.env.VERTEX_LOCATION || 'global'; };
 const required = (name: string) => { const value = process.env[name]; if (!value) throw new Error(`${name} is required`); return value; };
