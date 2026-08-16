@@ -1,6 +1,6 @@
 import { FunctionTool, InMemorySessionService, LlmAgent, Runner, stringifyContent } from '@google/adk';
 import { Type } from '@google/genai';
-import type { CompleteProjectReport, Project, ProjectStatus } from '@dailies/shared';
+import type { CompleteProjectReport, DraftHistoryEntry, Project, ProjectStatus } from '@dailies/shared';
 import { analyzeVideo } from './analysisAgent.js';
 import { createEditPlan } from './editingAgent.js';
 import { generateScore } from './scoreAgent.js';
@@ -44,6 +44,18 @@ export async function runEditorialAgent(input: JobInput, update: (state: JobStat
     if (!progress.analysis) return { ok: false, requiredNext: 'diagnose_source_video' };
     if (!progress.recommendation) return { ok: false, requiredNext: 'load_creator_evidence' };
     if (progress.editPlan && progress.editorialReview?.decision !== 'revise') return { ok: true, reusedDurablePlan: true, targetDurationSeconds: progress.editPlan.targetDurationSeconds, segments: progress.editPlan.segments.length, rationale: progress.editPlan.rationale };
+    // Review wants another revision, but if the draft budget is already spent there is no
+    // render_edit_draft call left to ever test that revision against — designing one anyway just
+    // burns a full plan+asset cycle before hitting the same wall. Ship the best-scoring draft
+    // already rendered (from draftHistory) instead of discarding every one of them for nothing.
+    if (progress.editorialReview?.decision === 'revise' && iteration >= MAX_DRAFTS) {
+      const best = bestDraft(progress.draftHistory);
+      if (best) {
+        await checkpoint('editing', { editPlan: best.editPlan, finalCut: best.finalCut, editorialReview: { ...best.editorialReview, decision: 'pass' }, editorialIteration: best.iteration, finalized: true }, `All ${MAX_DRAFTS} drafts used and none passed outright. Publishing draft ${best.iteration} (score ${Math.round(best.editorialReview.score.total)}/100, the best of ${progress.draftHistory!.length} rendered) as the final cut instead of discarding every rendered draft.`);
+        iteration = best.iteration;
+        return { ok: true, finalizedFromHistory: true, iteration: best.iteration, score: best.editorialReview.score.total, remainingIssues: best.editorialReview.issues.length };
+      }
+    }
     await checkpoint('editing', {}, progress.editorialReview?.decision === 'revise' ? `Agent is revising draft ${progress.editorialReview.iteration} from the rendered-video critique.` : 'Agent is designing the first executable edit from the complete diagnosis.');
     const revision = progress.editorialReview?.decision === 'revise' && progress.editPlan ? { previousPlan: progress.editPlan, review: progress.editorialReview } : undefined;
     const editPlan = await createEditPlan(progress.analysis, progress.recommendation, revision);
@@ -100,6 +112,7 @@ export async function runEditorialAgent(input: JobInput, update: (state: JobStat
   }});
 
   const render = new FunctionTool({ name: 'render_edit_draft', description: 'Execute the current agent-authored edit plan with FFmpeg/Google Cloud and persist a distinct cloud draft. Never call without a current plan and generated assets.', parameters: reasonSchema, execute: async () => {
+    if (progress.finalized) return { ok: true, alreadyFinalized: true, iteration, decision: 'pass' };
     if (!progress.analysis) return { ok: false, requiredNext: 'diagnose_source_video' };
     if (!progress.editPlan) return { ok: false, requiredNext: 'design_or_revise_edit' };
     if (!progress.soundtrack) return { ok: false, requiredNext: 'generate_editorial_assets' };
@@ -122,6 +135,10 @@ export async function runEditorialAgent(input: JobInput, update: (state: JobStat
   }});
 
   const review = new FunctionTool({ name: 'inspect_rendered_draft', description: 'Watch the actual cloud-rendered draft alongside the source, diagnose remaining editorial defects, and return pass or timestamped revision requirements. Rendering success is not approval.', parameters: reasonSchema, execute: async () => {
+    // Already resolved by design_or_revise_edit shipping the best draft from history after the
+    // budget ran out — re-reviewing the same rendered video would just risk a fresh 'revise'
+    // verdict overwriting that resolution and reopening a loop with no render budget left to act on it.
+    if (progress.finalized && progress.editorialReview) return { ok: true, decision: progress.editorialReview.decision, score: progress.editorialReview.score, summary: progress.editorialReview.summary, issues: progress.editorialReview.issues, draftsRemaining: 0, alreadyFinalized: true };
     if (!progress.analysis || !progress.editPlan || !progress.recommendation || !progress.finalCut) return { ok: false, requiredNext: 'render_edit_draft' };
     await checkpoint('editing', {}, `Editorial agent is now watching rendered draft ${iteration} beside the original source.`);
     const editorialReview = await reviewRenderedDraft({ iteration, sourceUri: input.videoUri, sourceMimeType: input.mimeType || 'video/mp4', draftUri: renderedUri(input, progress.finalCut), analysis: progress.analysis, editPlan: progress.editPlan, recommendation: progress.recommendation });
@@ -131,7 +148,12 @@ export async function runEditorialAgent(input: JobInput, update: (state: JobStat
     // rationale alone. Don't claim a major-issue count of 0 as the reason for revision — fall back
     // to the reviewer's own summary so the checkpoint message is never self-contradictory.
     const reviseReason = majorIssues ? `${majorIssues} major/blocking issue${majorIssues === 1 ? '' : 's'} found` : editorialReview.summary || 'reviewer flagged remaining issues';
-    await checkpoint('editing', { editorialReview }, editorialReview.decision === 'pass' ? `Draft ${iteration} passed rendered-video review with a score of ${Math.round(editorialReview.score.total)}.` : `Draft ${iteration} needs revision: ${reviseReason}. Agent will revise the edit.`);
+    // Preserve every reviewed draft (plan + render + its review) even though editPlan/finalCut/
+    // editorialReview themselves get overwritten or cleared on the next revision — this is what lets
+    // design_or_revise_edit ship the best-scoring draft instead of failing outright if the draft
+    // budget runs out before any single one passes.
+    const draftHistory = [...(progress.draftHistory || []), { iteration, editPlan: progress.editPlan, finalCut: progress.finalCut, editorialReview }];
+    await checkpoint('editing', { editorialReview, draftHistory }, editorialReview.decision === 'pass' ? `Draft ${iteration} passed rendered-video review with a score of ${Math.round(editorialReview.score.total)}.` : `Draft ${iteration} needs revision: ${reviseReason}. Agent will revise the edit.`);
     return { ok: true, decision: editorialReview.decision, score: editorialReview.score, summary: editorialReview.summary, issues: editorialReview.issues, draftsRemaining: MAX_DRAFTS - iteration };
   }});
 
@@ -169,6 +191,7 @@ const visualAssetSchema = { type: Type.OBJECT, required: ['cueId', 'reason'], pr
 const visualValidationSchema = { type: Type.OBJECT, required: ['cueId'], properties: { cueId: { type: Type.STRING, description: 'The exact cue ID to validate.' } } };
 const progressSummary = (progress: NonNullable<Project['progress']>) => ({ hasAnalysis: Boolean(progress.analysis), hasCreatorEvidence: Boolean(progress.recommendation), hasAssets: Boolean(progress.soundtrack), hasEditPlan: Boolean(progress.editPlan), hasDraft: Boolean(progress.finalCut), reviewDecision: progress.editorialReview?.decision, editorialIteration: progress.editorialIteration || 0 });
 const visualCueIds = (progress: NonNullable<Project['progress']>) => (progress.soundtrack?.cues || []).filter((cue) => cue.visualGenerationPrompt?.trim() && !cue.visualAsset).map((cue) => cue.id);
+const bestDraft = (history?: DraftHistoryEntry[]): DraftHistoryEntry | undefined => history?.length ? history.reduce((best, entry) => entry.editorialReview.score.total > best.editorialReview.score.total ? entry : best) : undefined;
 const renderedUri = (input: JobInput, finalCut: NonNullable<Project['progress']>['finalCut']) => `gs://${required('GCS_BUCKET')}/${input.ownerId}/${input.projectId}/${finalCut!.asset.id}/${finalCut!.asset.fileName}`;
 const configureVertexEnvironment = () => { process.env.GOOGLE_GENAI_USE_VERTEXAI ||= 'true'; process.env.GOOGLE_CLOUD_PROJECT ||= required('GCP_PROJECT_ID'); process.env.GOOGLE_CLOUD_LOCATION ||= process.env.VERTEX_LOCATION || 'global'; };
 const required = (name: string) => { const value = process.env[name]; if (!value) throw new Error(`${name} is required`); return value; };

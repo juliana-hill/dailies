@@ -157,6 +157,13 @@ export const editorialReviewSchema = z.object({
 });
 export type EditorialReview = z.infer<typeof editorialReviewSchema>;
 
+// One rendered-and-reviewed draft, preserved across revisions so the best of them can still be
+// shipped as the final cut if the draft budget runs out before any single draft passes outright.
+export const draftHistoryEntrySchema = z.object({
+  iteration: z.number().int().positive(), editPlan: editPlanSchema, finalCut: finalCutResultSchema, editorialReview: editorialReviewSchema,
+});
+export type DraftHistoryEntry = z.infer<typeof draftHistoryEntrySchema>;
+
 export const renderCheckpointSchema = z.object({
   renderJobId: z.string().min(1), assetId: z.string().min(1), outputUri: z.string().min(1), submittedAt: z.string().datetime(),
 });
@@ -175,7 +182,7 @@ export const projectSchema = z.object({
   createdAt: z.string().datetime(), updatedAt: z.string().datetime(),
   uploadAssetId: z.string().optional(), report: completeProjectReportSchema.optional(),
   creatorHistoryEnabled: z.boolean().optional(),
-  progress: z.object({ analysis: analysisResultSchema.optional(), soundtrack: soundtrackResultSchema.optional(), soundtrackDraft: soundtrackResultSchema.optional(), recommendation: recommendationSchema.optional(), editPlan: editPlanSchema.optional(), render: renderCheckpointSchema.optional(), finalCut: finalCutResultSchema.optional(), editorialReview: editorialReviewSchema.optional(), editorialIteration: z.number().int().nonnegative().optional() }).optional(),
+  progress: z.object({ analysis: analysisResultSchema.optional(), soundtrack: soundtrackResultSchema.optional(), soundtrackDraft: soundtrackResultSchema.optional(), recommendation: recommendationSchema.optional(), editPlan: editPlanSchema.optional(), render: renderCheckpointSchema.optional(), finalCut: finalCutResultSchema.optional(), editorialReview: editorialReviewSchema.optional(), editorialIteration: z.number().int().nonnegative().optional(), draftHistory: z.array(draftHistoryEntrySchema).optional(), finalized: z.boolean().optional() }).optional(),
   error: z.string().optional(),
 });
 export type Project = z.infer<typeof projectSchema>;
