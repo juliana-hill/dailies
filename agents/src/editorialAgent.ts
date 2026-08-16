@@ -104,9 +104,19 @@ export async function runEditorialAgent(input: JobInput, update: (state: JobStat
     if (!progress.editPlan) return { ok: false, requiredNext: 'design_or_revise_edit' };
     if (!progress.soundtrack) return { ok: false, requiredNext: 'generate_editorial_assets' };
     if (visualCueIds(progress).length) return { ok: false, requiredNext: 'generate_visual_asset', visualCuesRemaining: visualCueIds(progress) };
-    if (iteration >= MAX_DRAFTS) return { ok: false, draftLimitReached: true, maximumDrafts: MAX_DRAFTS };
-    iteration += 1; await checkpoint('rendering', { editorialIteration: iteration, render: undefined, finalCut: undefined }, `Agent approved the timeline for execution. Rendering draft ${iteration} of ${MAX_DRAFTS}.`);
-    const finalCut = await renderFinalCut({ projectId: input.projectId, ownerId: input.ownerId, sourceUri: input.videoUri, sourceDurationSeconds: input.durationSeconds, soundtrack: progress.soundtrack, editorialCues: progress.analysis.audioCues, editPlan: progress.editPlan, executionAttempt: (input.executionAttempt || 1) * 10 + iteration }, async (renderCheckpoint) => checkpoint('rendering', { render: renderCheckpoint }, `Draft ${iteration} render submitted; cloud output checkpoint saved.`));
+    // A worker crash or lost lease can interrupt a render after it's submitted (progress.render
+    // checkpointed) but before the draft is confirmed complete (progress.finalCut). Resuming that
+    // must reattach to the same render — renderFinalCut/renderWithFfmpeg already know how to poll
+    // an existing cloud job or reuse an already-uploaded output when handed that checkpoint back —
+    // rather than silently starting a duplicate render and burning another of the MAX_DRAFTS slots.
+    const resumingRender = Boolean(progress.render) && !progress.finalCut;
+    if (!resumingRender) {
+      if (iteration >= MAX_DRAFTS) return { ok: false, draftLimitReached: true, maximumDrafts: MAX_DRAFTS };
+      iteration += 1; await checkpoint('rendering', { editorialIteration: iteration, render: undefined, finalCut: undefined }, `Agent approved the timeline for execution. Rendering draft ${iteration} of ${MAX_DRAFTS}.`);
+    } else {
+      await checkpoint('rendering', {}, `Reattaching to the in-flight render for draft ${iteration} of ${MAX_DRAFTS} after a worker restart.`);
+    }
+    const finalCut = await renderFinalCut({ projectId: input.projectId, ownerId: input.ownerId, sourceUri: input.videoUri, sourceDurationSeconds: input.durationSeconds, soundtrack: progress.soundtrack, editorialCues: progress.analysis.audioCues, editPlan: progress.editPlan, executionAttempt: (input.executionAttempt || 1) * 10 + iteration, checkpoint: progress.render }, async (renderCheckpoint) => checkpoint('rendering', { render: renderCheckpoint }, `Draft ${iteration} render submitted; cloud output checkpoint saved.`));
     await checkpoint('rendering', { finalCut }, `Draft ${iteration} rendered successfully (${Math.round(finalCut.durationSeconds)} seconds). It is not final until the agent watches and approves it.`);
     return { ok: true, iteration, draftUri: renderedUri(input, finalCut), durationSeconds: finalCut.durationSeconds, provider: finalCut.renderProvider };
   }});
