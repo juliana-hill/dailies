@@ -51,7 +51,7 @@ export function buildFilterComplex(plan: EditPlan, cues: MusicCue[] = [], editor
   // the filter chain) so this is O(each overlay's own window), not O(five × the whole video).
   const visualDurations = visualCues.map((cue) => { const mapped = mapCue(cue, segments); if (!mapped) return 3; const span = mapped.end - mapped.start; return (cue.visualMode === 'full_frame' ? span : Math.min(1.8, Math.max(.7, span))) + .6; });
   const mappedEditorialCues = editorialCues.map((cue) => ({ cue, mapped: mapCue(cue, segments) })).filter((value) => value.mapped);
-  const effects = mappedEditorialCues.filter(({ cue }) => cue.type !== 'silence' && Boolean(cue.visualGenerationPrompt?.trim() || cue.visualCompanion?.trim())).slice(0, 8);
+  const effects = mappedEditorialCues.filter(({ cue }) => cue.type !== 'silence' && Boolean(cue.visualGenerationPrompt?.trim() || cue.visualCompanion?.trim()));
   const missingAudio = effects.find(({ cue }) => !generatedCues.has(cue.id));
   if (missingAudio) throw new Error(`Visual cue ${missingAudio.cue.id} requires its generated audio asset`);
   const missingVisual = effects.find(({ cue }) => !generatedCues.get(cue.id)?.visualAsset);
