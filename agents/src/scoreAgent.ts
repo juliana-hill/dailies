@@ -91,10 +91,27 @@ export async function generateScore(
       const generated = await awaitTrebloGeneration(providerJobId, onActivity);
       audio = generated; cueModel = generated.model; provider = generated.provider;
     } else {
-      reelPrompt = await createProviderPrompt(imageAi, compositionBrief, 'lyria');
+      // Reuse a prompt already durably checkpointed by a previous attempt (e.g. one already revised
+      // past a content block below) instead of re-deriving one from the composition brief every time
+      // this function is re-entered after a worker restart.
+      reelPrompt ||= await createProviderPrompt(imageAi, compositionBrief, 'lyria');
       await onActivity?.(`Gemini adapted its composition brief for ${cueModel}; requesting one cohesive editorial soundtrack.`);
       let response: Response | undefined; let requestFailure: unknown;
       try { response = await requestLyria(project, { ...headers } as Record<string, string>, cueModel, reelPrompt); } catch (error) { requestFailure = error; }
+      // A 400 content_blocked response means Vertex's policy filter tripped on the prompt itself —
+      // a different provider would likely hit the same filter, so this isn't a shouldFallbackFromLyria
+      // case. Gemini can usually revise around it (drop whatever phrase read as a trigger) without
+      // discarding the composition brief or restarting the editorial decision that produced it. Each
+      // revision is checkpointed as it's made, so a worker restart mid-loop resumes from the latest
+      // revised prompt above instead of retrying the same blocked one from scratch.
+      let blockedDiagnostic = response && !response.ok ? safeDiagnostic(await response.text()) : '';
+      for (let attempt = 1; attempt <= 2 && response?.status === 400 && isContentBlocked(blockedDiagnostic); attempt += 1) {
+        await onActivity?.(`Lyria blocked the soundtrack request for an unspecified policy reason; Gemini is revising the composition prompt and retrying (${attempt}/2).`);
+        reelPrompt = await reviseBlockedReelPrompt(imageAi, compositionBrief, reelPrompt, blockedDiagnostic, 'lyria');
+        await recovery?.checkpoint?.(soundtrackResultSchema.parse({ needed: true, rationale: 'Lyria blocked the previous soundtrack prompt for a policy reason; Gemini revised it and a retry is durably checkpointed.', cues: [], model: cueModel, compositionBrief, prompt: reelPrompt }));
+        try { response = await requestLyria(project, { ...headers } as Record<string, string>, cueModel, reelPrompt); requestFailure = undefined; blockedDiagnostic = response.ok ? '' : safeDiagnostic(await response.text()); }
+        catch (error) { requestFailure = error; response = undefined; break; }
+      }
       const useFallback = Boolean(process.env.TREBLO_API_KEY) && (requestFailure !== undefined || (response && shouldFallbackFromLyria(response.status)));
       if (useFallback) {
         const reason = requestFailure ? 'network availability' : `HTTP ${response!.status} capacity`;
@@ -109,7 +126,7 @@ export async function generateScore(
         audio = generated; cueModel = generated.model;
       } else {
         if (requestFailure) throw requestFailure;
-        if (!response!.ok) throw new Error(`Lyria soundtrack request failed with HTTP ${response!.status}: ${safeDiagnostic(await response!.text())}`);
+        if (!response!.ok) throw new Error(`Lyria soundtrack request failed with HTTP ${response!.status}: ${blockedDiagnostic}`);
         audio = extractAudio(await response!.json()); provider = 'lyria';
       }
     }
@@ -239,6 +256,15 @@ async function createProviderPrompt(ai: GoogleGenAI, compositionBrief: string, p
   const response = await ai.models.generateContent({ model: process.env.GEMINI_MODEL || 'gemini-3-flash-preview', contents: `${providerDirection} Preserve every cue and its order from the approved composition brief; do not add unrelated sections. This is one generation request for one continuous audio file, not separate requests per cue. Include brief natural separation between sections so a later Gemini listening pass can locate exact ranges. Remove artist names, brands, copyrighted references, quoted phrases, lyrics, vocals, and speech. Return only the final provider prompt, no Markdown. Composition brief: ${compositionBrief}` });
   const prompt = response.text?.trim().replace(/^['"`]+|['"`]+$/g, '');
   if (!prompt || prompt.length < 40) throw new Error(`Gemini did not return a usable consolidated ${providerName(provider)} soundtrack prompt`);
+  return `${prompt} One continuous cohesive instrumental audio file; no vocals or speech; organic found sounds may be used as musical material; preserve the complete ordered section sequence.`;
+}
+async function reviseBlockedReelPrompt(ai: GoogleGenAI, compositionBrief: string, blockedPrompt: string, diagnostic: string, provider: 'lyria' | 'treblo') {
+  const providerDirection = provider === 'lyria'
+    ? 'Adapt this for Google Lyria. Be concise and describe the continuous musical/audio progression in chronological order.'
+    : 'Adapt this for Treblo Melodia v3. Request one instrumental soundtrack whose ordered sections remain clearly distinguishable. Treblo infers tags from the prompt, so use precise production, instrumentation, mood, transition, and organic-sample language without lyrics.';
+  const response = await ai.models.generateContent({ model: process.env.GEMINI_MODEL || 'gemini-3-flash-preview', contents: `${providerDirection} The previous prompt below was rejected by the provider's content policy filter (diagnostic: ${diagnostic.slice(0, 300)}). Revise it to remove whatever most plausibly tripped the filter — an artist/brand name, a copyrighted or trademarked reference, an ambiguous or explicit phrase — while preserving every cue and its order from the approved composition brief; do not add unrelated sections. This is one generation request for one continuous audio file, not separate requests per cue. Remove artist names, brands, copyrighted references, quoted phrases, lyrics, vocals, and speech. Return only the revised provider prompt, no Markdown. Composition brief: ${compositionBrief} Previous blocked prompt: ${blockedPrompt}` });
+  const prompt = response.text?.trim().replace(/^['"`]+|['"`]+$/g, '');
+  if (!prompt || prompt.length < 40) throw new Error(`Gemini did not return a usable revised ${providerName(provider)} soundtrack prompt after a content-policy block`);
   return `${prompt} One continuous cohesive instrumental audio file; no vocals or speech; organic found sounds may be used as musical material; preserve the complete ordered section sequence.`;
 }
 async function indexSoundReel(ai: GoogleGenAI, uri: string, mimeType: string, durationSeconds: number, cues: AnalysisResult['audioCues']) {
