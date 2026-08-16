@@ -14,12 +14,24 @@ export const retryProject = createAsyncThunk('project/retry', async (id, { rejec
 export const openProject = createAsyncThunk('project/open', async (id, { rejectWithValue }) => { try { return await api.project(id); } catch (error) { return rejectWithValue(errorPayload(error)); } });
 
 const projectInitial = { id: null, status: 'idle', fileName: '', outline: '', processingStage: 0, error: null, errorCode: null, retryable: false, report: null, activity: [], activityError: null, uploadAssetId: null, creatorHistoryEnabled: null };
-const stageFor = { created: 0, uploading: 0, uploaded: 1, analyzing: 1, scoring: 2, querying_insights: 3, waiting_for_service: 3, editing: 4, rendering: 5, complete: 6, failed: 0 };
+// Numbered to match the WorkflowStepper's step order (Ingest/Analyze/Insight/Edit/Score/Render),
+// which itself follows the editorial agent's actual first-pass sequence — analyze, then optional
+// creator evidence, then the edit plan, then the assets that plan justifies, then render.
+const stageFor = { created: 0, uploading: 0, uploaded: 1, analyzing: 1, querying_insights: 2, waiting_for_service: 2, editing: 3, scoring: 4, rendering: 5, complete: 6, failed: 0 };
 // A project fetched from the backend at status 'created' never made it past the initial
 // record — the browser's direct-to-GCS upload never finalized (network drop, CORS, tab
 // closed mid-upload, etc). There's no pipeline running to poll for, so surface it as a
 // failure with a path back to a fresh upload rather than showing a fake progress screen.
-const assignProject = (state, project) => { const stalled = project.status === 'created'; state.id = project.projectId; state.status = stalled ? 'failed' : project.status; state.fileName = project.fileName; state.outline = project.outline; state.processingStage = stageFor[project.status] ?? 0; state.error = stalled ? 'The upload never finished, so there is nothing to analyze yet. Start over to upload the footage again.' : project.error || null; state.errorCode = stalled ? 'UPLOAD_NOT_FINALIZED' : state.errorCode; state.retryable = stalled ? false : state.retryable; state.report = project.report || null; state.progress = project.progress || null; state.uploadAssetId = project.uploadAssetId || null; state.creatorHistoryEnabled = project.creatorHistoryEnabled ?? null; };
+const assignProject = (state, project) => {
+  const stalled = project.status === 'created'; const sameProject = state.id === project.projectId; const targetStage = stageFor[project.status] ?? 0;
+  state.id = project.projectId; state.status = stalled ? 'failed' : project.status; state.fileName = project.fileName; state.outline = project.outline;
+  // The editorial agent's edit/score checkpoints interleave — a revision loop re-enters 'editing'
+  // after 'scoring', and 'editing' recurs again after 'rendering' for review — rather than advancing
+  // strictly through stageFor's order. Track the furthest stage reached per project instead of the
+  // latest status literally, or the stepper visibly jumps backward each time an earlier stage recurs.
+  state.processingStage = sameProject ? Math.max(state.processingStage, targetStage) : targetStage;
+  state.error = stalled ? 'The upload never finished, so there is nothing to analyze yet. Start over to upload the footage again.' : project.error || null; state.errorCode = stalled ? 'UPLOAD_NOT_FINALIZED' : state.errorCode; state.retryable = stalled ? false : state.retryable; state.report = project.report || null; state.progress = project.progress || null; state.uploadAssetId = project.uploadAssetId || null; state.creatorHistoryEnabled = project.creatorHistoryEnabled ?? null;
+};
 const projectSlice = createSlice({ name: 'project', initialState: projectInitial, reducers: { projectReset: () => projectInitial, projectFailed: (state, action) => { state.status = 'failed'; state.error = action.payload; }, }, extraReducers: (builder) => builder
   .addCase(submitProject.pending, (state, action) => { state.status = 'uploading'; state.fileName = action.meta.arg.file?.name || ''; state.outline = action.meta.arg.outline || ''; state.error = null; })
   .addCase(submitProject.fulfilled, (state, action) => assignProject(state, action.payload))

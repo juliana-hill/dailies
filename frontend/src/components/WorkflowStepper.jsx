@@ -1,6 +1,9 @@
 import React from 'react';
 
-const stages = ['Ingest', 'Analyze', 'Score', 'Insight', 'Edit', 'Render'];
+// Order matches the editorial agent's actual first-pass sequence (agents/src/editorialAgent.ts):
+// diagnose -> optional creator evidence -> design the edit -> generate scored assets -> render.
+// Score is listed after Edit (not before) because asset generation is driven by the edit plan.
+const stages = ['Ingest', 'Analyze', 'Insight', 'Edit', 'Score', 'Render'];
 export default function WorkflowStepper({ status, currentStage, events = [], activityError, creatorHistoryEnabled }) {
   const visibleStage = status === 'uploading' ? 0 : currentStage;
   const activity = compactEvents(events);
