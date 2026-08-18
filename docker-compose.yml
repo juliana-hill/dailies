@@ -51,10 +51,17 @@ services:
       NODE_ENV: development
       PORT: "8080"
       CLICKHOUSE_MCP_URL: http://ingestion:8080/mcp
+      # Keep the renderer inside what a Cloud Run instance actually gets. Without this the container
+      # inherits the whole Docker VM (16 CPUs / 30GB), so a render that works fine in dev can OOM or
+      # crawl once deployed — and meanwhile it takes the developer's machine with it.
+      FFMPEG_THREADS: "2"
     ports:
       - "8081:8080"
     volumes: *adc-volume
     depends_on: [ingestion]
+    # Mirrors `gcloud run deploy dailies-agents --memory 4Gi --cpu 2` from the README.
+    cpus: 2
+    mem_limit: 4g
 
   frontend:
     build:

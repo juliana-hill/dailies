@@ -6,8 +6,8 @@ import { renderWithFfmpeg, requiresFfmpeg } from './ffmpegRenderer.js';
 
 type RenderInput = { projectId: string; ownerId: string; sourceUri: string; sourceDurationSeconds: number; soundtrack: SoundtrackResult; editorialCues?: EditorialAudioCue[]; editPlan: EditPlan; executionAttempt?: number; checkpoint?: RenderCheckpoint };
 
-export async function renderFinalCut(input: RenderInput, onSubmitted?: (checkpoint: RenderCheckpoint) => Promise<void>): Promise<FinalCutResult> {
-  if (requiresFfmpeg(input.editPlan) || (input.soundtrack.cues?.length || 0) > 0 || (input.editorialCues?.some((cue) => cue.type !== 'music' && cue.type !== 'silence') ?? false) || !input.soundtrack.asset) return renderWithFfmpeg(input, onSubmitted);
+export async function renderFinalCut(input: RenderInput, onSubmitted?: (checkpoint: RenderCheckpoint) => Promise<void>, onStep?: (message: string) => Promise<void>): Promise<FinalCutResult> {
+  if (requiresFfmpeg(input.editPlan) || (input.soundtrack.cues?.length || 0) > 0 || (input.editorialCues?.some((cue) => cue.type !== 'music' && cue.type !== 'silence') ?? false) || !input.soundtrack.asset) return renderWithFfmpeg(input, onSubmitted, onStep);
   if (input.sourceDurationSeconds < 5) throw new Error('Cloud Transcoder requires source footage of at least five seconds');
   const project = required('GCP_PROJECT_ID'); const bucket = required('GCS_BUCKET'); const location = process.env.TRANSCODER_LOCATION || 'us-central1';
   const legacyAsset = input.soundtrack.asset!; const soundtrackUri = `gs://${bucket}/${input.ownerId}/${input.projectId}/${legacyAsset.id}/${legacyAsset.fileName}`;

@@ -14,12 +14,17 @@ import type { JobInput, JobState } from './orchestrator.js';
 
 const APP_NAME = 'dailies_editorial_agent';
 const MAX_DRAFTS = 3;
+// How many times one invocation may attempt a render before it stops trying. Each attempt is a full
+// encode of the timeline; an unbounded model-driven retry keeps the CPU pinned for as long as it
+// takes the model to give up, which in practice it does not.
+const MAX_RENDER_FAILURES = 2;
 
 export async function runEditorialAgent(input: JobInput, update: (state: JobState['status'], progress?: Project['progress'], activityMessage?: string) => void | Promise<void>): Promise<CompleteProjectReport> {
   configureVertexEnvironment();
   let progress: NonNullable<Project['progress']> = input.progress || {};
   let iteration = progress.editorialIteration || (progress.finalCut ? 1 : 0);
   let fatalToolError: unknown;
+  let renderFailures = 0;
 
   const checkpoint = async (status: ProjectStatus, patch: Partial<NonNullable<Project['progress']>>, activityMessage?: string) => {
     progress = { ...progress, ...patch };
@@ -173,7 +178,7 @@ export async function runEditorialAgent(input: JobInput, update: (state: JobStat
     return { ok: true, approved: true, cueId, assetId: cue.visualAsset.id, generationModel: cue.visualAsset.generationModel, diagnosis: review.diagnosis };
   }});
 
-  const render = new FunctionTool({ name: 'render_edit_draft', description: 'Execute the current agent-authored edit plan with FFmpeg/Google Cloud and persist a distinct cloud draft. Never call without a current plan and generated assets.', parameters: reasonSchema, execute: async () => {
+  const render = new FunctionTool({ name: 'render_edit_draft', description: 'Execute the current agent-authored edit plan with FFmpeg/Google Cloud and persist a distinct cloud draft. Never call without a current plan and generated assets.', parameters: reasonSchema, execute: async (_reason, toolContext) => {
     if (progress.finalized) return { ok: true, alreadyFinalized: true, iteration, decision: 'pass' };
     if (!progress.analysis) return { ok: false, requiredNext: 'diagnose_source_video' };
     if (!progress.editPlan) return { ok: false, requiredNext: 'design_or_revise_edit' };
@@ -191,7 +196,27 @@ export async function runEditorialAgent(input: JobInput, update: (state: JobStat
     } else {
       await checkpoint('rendering', {}, `Reattaching to the in-flight render for draft ${iteration} of ${MAX_DRAFTS} after a worker restart.`);
     }
-    const finalCut = await renderFinalCut({ projectId: input.projectId, ownerId: input.ownerId, sourceUri: input.videoUri, sourceDurationSeconds: input.durationSeconds, soundtrack: progress.soundtrack, editorialCues: progress.analysis.audioCues, editPlan: progress.editPlan, executionAttempt: (input.executionAttempt || 1) * 10 + iteration, checkpoint: progress.render }, async (renderCheckpoint) => checkpoint('rendering', { render: renderCheckpoint }, `Draft ${iteration} render submitted; cloud output checkpoint saved.`));
+    let finalCut;
+    try {
+      finalCut = await renderFinalCut({ projectId: input.projectId, ownerId: input.ownerId, sourceUri: input.videoUri, sourceDurationSeconds: input.durationSeconds, soundtrack: progress.soundtrack, editorialCues: progress.analysis.audioCues, editPlan: progress.editPlan, executionAttempt: (input.executionAttempt || 1) * 10 + iteration, checkpoint: progress.render },
+        async (renderCheckpoint) => checkpoint('rendering', { render: renderCheckpoint }, `Draft ${iteration} render submitted; cloud output checkpoint saved.`),
+        // Every individual edit reports itself into the live activity feed as it lands, so the render
+        // is a visible sequence of applied edits rather than one silent block of time.
+        async (message) => checkpoint('rendering', {}, `Draft ${iteration}: ${message}`));
+    } catch (error) {
+      // A render that failed is not something the model can fix by asking for it again — the same
+      // plan and the same assets rebuild the same ffmpeg graph. Letting the failure reach the model
+      // as an ordinary tool error meant it simply called this tool again, and each of those calls is
+      // minutes of a fully saturated encoder (plus a stall-timeout wait when the graph wedges rather
+      // than errors). Give it one retry for a genuinely transient fault, then end the invocation and
+      // let the worker's own bounded, backed-off retry own it instead of spinning here.
+      renderFailures += 1;
+      if (renderFailures < MAX_RENDER_FAILURES) return { ok: false, retryable: true, iteration, renderAttempts: renderFailures, error: String((error as any)?.message || error).slice(0, 500), instruction: 'The render failed. Do not call render_edit_draft again unless you have first changed the plan or the assets it depends on.' };
+      fatalToolError = error;
+      toolContext!.invocationContext.endInvocation = true;
+      return { ok: false, fatal: true, retryableByWorker: true, iteration, renderAttempts: renderFailures, error: String((error as any)?.message || error).slice(0, 500) };
+    }
+    renderFailures = 0;
     await checkpoint('rendering', { finalCut }, `Draft ${iteration} rendered successfully (${Math.round(finalCut.durationSeconds)} seconds). It is not final until the agent watches and approves it.`);
     return { ok: true, iteration, draftUri: renderedUri(input, finalCut), durationSeconds: finalCut.durationSeconds, provider: finalCut.renderProvider };
   }});
