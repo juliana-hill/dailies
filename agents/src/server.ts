@@ -14,6 +14,10 @@ export class PipelineCoordinator {
   async submit(input: JobInput) { const job = await this.store.submit(input); this.kick(job.jobId); return job; }
   get(jobId: string) { return this.store.get(jobId); }
   events(jobId: string) { return this.store.listEvents(jobId); }
+  // A job actively running under this or another worker must not be reset out from under it — its
+  // next checkpoint/fail write would target a doc that no longer exists. Refuse while active; the
+  // caller (the API's restart endpoint) is expected to only call this for a failed/idle project.
+  async reset(jobId: string) { if (this.active.has(jobId)) throw new Error('PIPELINE_JOB_ACTIVE'); await this.store.reset(jobId); }
 
   async recover() { if (this.recoveryProjectId) { const job = await this.store.get(this.recoveryProjectId); if (job && !['complete', 'failed', 'waiting_for_service'].includes(job.status)) this.kick(job.jobId); return; } const jobs = await this.store.recoverable(); jobs.forEach((job) => this.kick(job.jobId)); }
   startRecoveryLoop() { void this.recover(); this.recoveryTimer = setInterval(() => void this.recover().catch((error) => console.error('Pipeline recovery scan failed', error)), Math.max(10_000, this.leaseSeconds * 500)); this.recoveryTimer.unref(); }
@@ -21,7 +25,13 @@ export class PipelineCoordinator {
   kick(jobId: string) {
     if (this.active.has(jobId)) return;
     this.active.add(jobId);
-    void this.run(jobId).finally(() => this.active.delete(jobId));
+    // `.catch` is load-bearing, not defensive habit. run()'s own error handler reports the failure
+    // back to Firestore, so a credential or connectivity fault fails that reporting too — and an
+    // unhandled rejection here terminates the entire worker process, taking every other job with it
+    // and surfacing to the UI as a bare "fetch failed" from the API's next hop.
+    void this.run(jobId)
+      .finally(() => this.active.delete(jobId))
+      .catch((error) => console.error(JSON.stringify({ level: 'error', message: 'Pipeline job aborted outside its error handler; worker staying up', jobId, error: String((error as any)?.message || error).slice(0, 500) })));
   }
 
   private async run(jobId: string) {
@@ -32,14 +42,22 @@ export class PipelineCoordinator {
       const report = await runWorkflow(input, async (status, progress, activityMessage) => this.store.checkpoint(jobId, this.workerId, status as ProjectStatus, progress, activityMessage));
       await this.store.complete(jobId, this.workerId, report);
     } catch (error) {
-      const current = await this.store.get(jobId); const recoveryCount = current?.recoveryCount || 0;
-      if (isConfigurationWait(error)) await this.store.waitForService(jobId, this.workerId, error);
-      else if (isQuotaLimited(error)) {
-        console.warn('Vertex AI quota limited; durable pipeline will retry', error);
-        await this.store.scheduleRetry(jobId, this.workerId, new Error('Vertex AI audio generation is temporarily at capacity; completed cues are preserved'), Math.min(15 * 60_000, 10_000 * (2 ** Math.min(recoveryCount, 6))));
+      // Recording the outcome is itself Firestore I/O, and the most common reason a job just failed is
+      // that Firestore is unreachable or its credentials are rejected — in which case every call below
+      // fails the same way. Log and move on rather than letting the reporting failure mask the original
+      // error and escalate into a process exit.
+      try {
+        const current = await this.store.get(jobId); const recoveryCount = current?.recoveryCount || 0;
+        if (isConfigurationWait(error)) await this.store.waitForService(jobId, this.workerId, error);
+        else if (isQuotaLimited(error)) {
+          console.warn('Vertex AI quota limited; durable pipeline will retry', error);
+          await this.store.scheduleRetry(jobId, this.workerId, new Error('Vertex AI audio generation is temporarily at capacity; completed cues are preserved'), Math.min(15 * 60_000, 10_000 * (2 ** Math.min(recoveryCount, 6))));
+        }
+        else if (isRetryable(error) && recoveryCount < 12) await this.store.scheduleRetry(jobId, this.workerId, error, Math.min(5 * 60_000, 10_000 * (2 ** recoveryCount)));
+        else await this.store.fail(jobId, this.workerId, error);
+      } catch (reportingError) {
+        console.error(JSON.stringify({ level: 'error', message: 'Could not record the pipeline failure; the lease simply expires and the recovery scan picks the job up again', jobId, originalError: String((error as any)?.message || error).slice(0, 500), reportingError: String((reportingError as any)?.message || reportingError).slice(0, 300) }));
       }
-      else if (isRetryable(error) && recoveryCount < 12) await this.store.scheduleRetry(jobId, this.workerId, error, Math.min(5 * 60_000, 10_000 * (2 ** recoveryCount)));
-      else await this.store.fail(jobId, this.workerId, error);
     }
     finally { clearInterval(heartbeat); }
   }
@@ -52,6 +70,7 @@ export function createApp(coordinator: PipelineCoordinator) {
   app.post('/jobs', async (req, res, next) => { try { const input = req.body as JobInput; if (!input.projectId || !input.ownerId || !input.videoUri || !input.durationSeconds) return res.status(400).json({ error: 'Invalid job' }); res.status(202).json(await coordinator.submit(input)); } catch (error) { next(error); } });
   app.get('/jobs/:jobId', async (req, res, next) => { try { const value = await coordinator.get(req.params.jobId); value ? res.json(value) : res.status(404).json({ error: 'Job not found' }); } catch (error) { next(error); } });
   app.get('/jobs/:jobId/events', async (req, res, next) => { try { const value = await coordinator.get(req.params.jobId); value ? res.json({ events: await coordinator.events(req.params.jobId) }) : res.status(404).json({ error: 'Job not found' }); } catch (error) { next(error); } });
+  app.delete('/jobs/:jobId', async (req, res, next) => { try { await coordinator.reset(req.params.jobId); res.status(204).end(); } catch (error: any) { if (error?.message === 'PIPELINE_JOB_ACTIVE') return res.status(409).json({ error: 'Job is still active' }); next(error); } });
   app.use((error: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => { console.error('Agent service request failed', error); res.status(500).json({ error: String(error?.message || error).slice(0, 500) }); });
   return app;
 }

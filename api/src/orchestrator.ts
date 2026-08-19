@@ -2,10 +2,14 @@ import { GoogleAuth } from 'google-auth-library';
 import { completeProjectReportSchema, projectStatusSchema, type CompleteProjectReport, type Project, type ProjectStatus } from '@dailies/shared';
 import type { Config } from './config.js';
 
-export interface Orchestrator { run(project: Project, videoUri: string, onStatus?: (status: ProjectStatus, progress?: Project['progress']) => Promise<void>): Promise<CompleteProjectReport>; activity?(projectId: string): Promise<{ events: unknown[] }>; }
+export interface Orchestrator { run(project: Project, videoUri: string, onStatus?: (status: ProjectStatus, progress?: Project['progress']) => Promise<void>): Promise<CompleteProjectReport>; activity?(projectId: string): Promise<{ events: unknown[] }>; reset?(projectId: string): Promise<void>; }
 export class HttpOrchestrator implements Orchestrator {
   constructor(private readonly config: Config) {}
   async activity(projectId: string) { const response = await fetch(`${requiredUrl(this.config.AGENT_SERVICE_URL)}/jobs/${projectId}/events`, { headers: await this.headers() }); if (response.status === 404) return { events: [] }; if (!response.ok) throw new Error(`Agent activity returned ${response.status}`); return response.json() as Promise<{ events: unknown[] }>; }
+  // Deletes the agent service's own durable job trail (draftHistory, editorialIteration, render
+  // checkpoints, event log) so the next run() submit for this projectId has no prior state to
+  // resume from — a genuine restart from the uploaded source, not a continuation of a failed one.
+  async reset(projectId: string) { const response = await fetch(`${requiredUrl(this.config.AGENT_SERVICE_URL)}/jobs/${projectId}`, { method: 'DELETE', headers: await this.headers() }); if (!response.ok && response.status !== 404) throw new Error(`Agent service reset returned ${response.status}`); }
   async run(project: Project, videoUri: string, onStatus?: (status: ProjectStatus, progress?: Project['progress']) => Promise<void>) {
     if (!this.config.AGENT_SERVICE_URL) throw new Error('AGENT_SERVICE_URL is not configured');
     const headers = await this.headers();

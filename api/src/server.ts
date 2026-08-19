@@ -58,6 +58,21 @@ export function createApp(deps: Dependencies) {
     const started = await repository.update(project.projectId, (p) => ({ ...p, creatorHistoryEnabled, status: 'analyzing', statusMessage: statusMessage.analyzing, error: undefined, updatedAt: new Date().toISOString() }));
     void runWorkflow(started, repository, orchestrator, config).catch(() => undefined); res.status(202).json(started);
   } catch (e) { next(e); } });
+  // "Try again" (/analyze on a failed project) deliberately resumes from whatever durable editorial
+  // state survived — that's the point of the checkpoint trail. "Start over" is the opposite ask: throw
+  // that state away and re-run the whole pipeline against the same uploaded source from a blank slate.
+  // That means deleting the agent service's own job/event trail (it durably tracks draftHistory,
+  // editorialIteration, and render checkpoints keyed by this same projectId) before re-triggering
+  // analysis, not just clearing the fields this API mirrors locally.
+  app.post('/api/projects/:projectId/restart', requireAuth, async (req, res, next) => { try {
+    const project = await ownedProject(req, repository);
+    if (!project.uploadAssetId || ['created', 'uploading'].includes(project.status)) return res.status(409).json({ error: { code: 'NOT_UPLOADED', message: 'Upload the project video before starting analysis.', retryable: true } });
+    if (['analyzing', 'scoring', 'querying_insights', 'waiting_for_service', 'editing', 'rendering'].includes(project.status)) return res.status(409).json({ error: { code: 'JOB_ACTIVE', message: 'The pipeline is still running; wait for it to finish or fail before starting over.', retryable: false } });
+    if (orchestrator.reset) await orchestrator.reset(project.projectId);
+    let creatorHistoryEnabled = false; try { creatorHistoryEnabled = (await youtube.status(req.user!.id)).connected; } catch (error: any) { console.warn(JSON.stringify({ level: 'warn', event: 'youtube_status_unavailable', message: safeError(error?.message || 'YouTube status unavailable') })); }
+    const started = await repository.update(project.projectId, (p) => { const { progress, report, error, ...rest } = p; return { ...rest, creatorHistoryEnabled, status: 'analyzing', statusMessage: statusMessage.analyzing, updatedAt: new Date().toISOString() }; });
+    void runWorkflow(started, repository, orchestrator, config).catch(() => undefined); res.status(202).json(started);
+  } catch (e) { next(e); } });
   app.get('/api/projects/:projectId', requireAuth, async (req, res, next) => { try { res.json(await ownedProject(req, repository)); } catch (e) { next(e); } });
   app.get('/api/projects/:projectId/activity', requireAuth, async (req, res, next) => { try { const project = await ownedProject(req, repository); res.json(orchestrator.activity ? await orchestrator.activity(project.projectId) : { events: [] }); } catch (e) { next(e); } });
   app.get('/api/projects/:projectId/assets/:assetId', requireAuth, async (req, res, next) => { try {

@@ -69,6 +69,20 @@ export class FirestoreJobStore {
     return snapshot.exists ? snapshot.data() as DurableJob : undefined;
   }
 
+  // "Start over" needs a genuinely blank slate, not the failed-status resume path submit() takes
+  // (which deliberately keeps draftHistory/editorialIteration/analysis and only drops the render
+  // checkpoint). Deleting the job doc and its event trail outright means the next submit() for this
+  // same projectId has no `current` to inherit from, so it starts every stage — diagnosis, plan,
+  // assets, render — from the uploaded source instead of resuming stale editorial state.
+  async reset(jobId: string): Promise<void> {
+    const reference = this.jobs.doc(jobId);
+    const events = await reference.collection('events').listDocuments();
+    const batch = this.firestore.batch();
+    events.forEach((doc) => batch.delete(doc));
+    batch.delete(reference);
+    await batch.commit();
+  }
+
   async listEvents(jobId: string, limit = 200): Promise<PipelineEvent[]> {
     const snapshot = await this.jobs.doc(jobId).collection('events').orderBy('createdAt', 'desc').limit(limit).get();
     return snapshot.docs.map((doc) => doc.data() as PipelineEvent).reverse();

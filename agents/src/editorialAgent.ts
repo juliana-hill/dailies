@@ -31,6 +31,26 @@ export async function runEditorialAgent(input: JobInput, update: (state: JobStat
     await update(status, progress, activityMessage);
   };
 
+  // Try the durable draftHistory first; if that's empty too (legacy state, predating draftHistory,
+  // or every render happened before a review could record it), reconcile directly against Cloud
+  // Storage — a completed render is real, billed work that should never be silently discarded just
+  // because its Firestore pointer was lost. Called both from design_or_revise_edit (when the model
+  // is still driving) and deterministically after the continuation loop gives up on its own — a model
+  // that stops calling tools and just writes a status report must not be able to bypass recovery.
+  const attemptBudgetExhaustedRecovery = async (): Promise<boolean> => {
+    const best = bestDraft(progress.draftHistory);
+    if (best) {
+      await checkpoint('editing', { editPlan: best.editPlan, finalCut: best.finalCut, editorialReview: { ...best.editorialReview, decision: 'pass' }, editorialIteration: best.iteration, finalized: true }, `All ${MAX_DRAFTS} drafts used and none passed outright. Publishing draft ${best.iteration} (score ${Math.round(best.editorialReview.score.total)}/100, the best of ${progress.draftHistory!.length} rendered) as the final cut instead of discarding every rendered draft.`);
+      iteration = best.iteration; return true;
+    }
+    const orphan = await findLatestOrphanedRender(input.ownerId, input.projectId);
+    if (!orphan) return false;
+    const finalCut = finalCutResultSchema.parse({ asset: { id: orphan.assetId, kind: 'rendered_video', fileName: orphan.fileName, mimeType: 'video/mp4', sizeBytes: orphan.sizeBytes, generationModel: 'ffmpeg-node-media-pipeline', createdAt: orphan.createdAt }, durationSeconds: progress.editPlan?.targetDurationSeconds || input.durationSeconds, renderProvider: 'ffmpeg-cloud-run', renderJobId: `ffmpeg:${orphan.assetId}` });
+    const editorialReview = editorialReviewSchema.parse({ iteration: iteration || 1, decision: 'pass', score: { hook: 70, pacing: 70, clarity: 70, visualQuality: 70, audioQuality: 70, total: 70, rationale: 'Recovered directly from a completed Cloud Storage render after the draft budget was exhausted with no durable review history available; not a fresh editorial verdict.' }, summary: 'The durable checkpoint trail lost track of this draft’s review, but a finished render was found in Cloud Storage and recovered as the final cut instead of failing.', issues: [] });
+    await checkpoint('editing', { editPlan: progress.editPlan, finalCut, editorialReview, finalized: true }, `No durable draft history was available, but a completed render (${orphan.assetId}) was found in Cloud Storage and recovered as the final cut.`);
+    return true;
+  };
+
   const diagnose = new FunctionTool({ name: 'diagnose_source_video', description: 'Watch and deeply diagnose the complete source video. Use this before making editing decisions. Reuses a durable diagnosis when present.', parameters: reasonSchema, execute: async () => {
     if (progress.analysis) return { ok: true, reusedDurableDiagnosis: true, sourceScore: progress.analysis.viewerScore, scenes: progress.analysis.scenes.length, editSignals: progress.analysis.editingSignals.length, audioVisualCues: progress.analysis.audioCues.length };
     if (!progress.analysis) await checkpoint('analyzing', {}, 'Editorial agent is watching the complete source and diagnosing its hook, pacing, audio, visuals, and payoff.');
@@ -51,28 +71,13 @@ export async function runEditorialAgent(input: JobInput, update: (state: JobStat
   const plan = new FunctionTool({ name: 'design_or_revise_edit', description: 'Create the initial executable timeline or revise it from the latest rendered-draft critique. Call again after every review with decision revise.', parameters: reasonSchema, execute: async () => {
     if (!progress.analysis) return { ok: false, requiredNext: 'diagnose_source_video' };
     if (!progress.recommendation) return { ok: false, requiredNext: 'load_creator_evidence' };
-    const shipBestDraft = async () => {
-      const best = bestDraft(progress.draftHistory); if (!best) return false;
-      await checkpoint('editing', { editPlan: best.editPlan, finalCut: best.finalCut, editorialReview: { ...best.editorialReview, decision: 'pass' }, editorialIteration: best.iteration, finalized: true }, `All ${MAX_DRAFTS} drafts used and none passed outright. Publishing draft ${best.iteration} (score ${Math.round(best.editorialReview.score.total)}/100, the best of ${progress.draftHistory!.length} rendered) as the final cut instead of discarding every rendered draft.`);
-      iteration = best.iteration; return true;
-    };
+    const shipBestDraft = async () => attemptBudgetExhaustedRecovery();
     // The draft budget is spent with nothing finalized — whether that's a genuine 'revise' decision
     // about to design a plan render_edit_draft can never test, or a resumed job whose Firestore
     // trail already lost finalCut/editorialReview to an earlier wasted cycle (a worker restart, or
     // this exact gap before it was fixed), the pipeline must still recover rather than fail outright.
-    // Try the durable draftHistory first; if that's empty too (legacy state, predating draftHistory,
-    // or every render happened before a review could record it), reconcile directly against Cloud
-    // Storage — a completed render is real, billed work that should never be silently discarded just
-    // because its Firestore pointer was lost.
     if (!progress.finalCut && iteration >= MAX_DRAFTS) {
       if (await shipBestDraft()) return { ok: true, finalizedFromHistory: true, iteration, decision: 'pass' };
-      const orphan = await findLatestOrphanedRender(input.ownerId, input.projectId);
-      if (orphan) {
-        const finalCut = finalCutResultSchema.parse({ asset: { id: orphan.assetId, kind: 'rendered_video', fileName: orphan.fileName, mimeType: 'video/mp4', sizeBytes: orphan.sizeBytes, generationModel: 'ffmpeg-node-media-pipeline', createdAt: orphan.createdAt }, durationSeconds: progress.editPlan?.targetDurationSeconds || input.durationSeconds, renderProvider: 'ffmpeg-cloud-run', renderJobId: `ffmpeg:${orphan.assetId}` });
-        const editorialReview = editorialReviewSchema.parse({ iteration: iteration || 1, decision: 'pass', score: { hook: 70, pacing: 70, clarity: 70, visualQuality: 70, audioQuality: 70, total: 70, rationale: 'Recovered directly from a completed Cloud Storage render after the draft budget was exhausted with no durable review history available; not a fresh editorial verdict.' }, summary: 'The durable checkpoint trail lost track of this draft’s review, but a finished render was found in Cloud Storage and recovered as the final cut instead of failing.', issues: [] });
-        await checkpoint('editing', { editPlan: progress.editPlan, finalCut, editorialReview, finalized: true }, `No durable draft history was available, but a completed render (${orphan.assetId}) was found in Cloud Storage and recovered as the final cut.`);
-        return { ok: true, recoveredFromStorage: true, assetId: orphan.assetId };
-      }
     }
     if (progress.editPlan && progress.editorialReview?.decision !== 'revise') return { ok: true, reusedDurablePlan: true, targetDurationSeconds: progress.editPlan.targetDurationSeconds, segments: progress.editPlan.segments.length, rationale: progress.editPlan.rationale };
     // Review wants another revision, but if the draft budget is already spent there is no
@@ -184,14 +189,33 @@ export async function runEditorialAgent(input: JobInput, update: (state: JobStat
     if (!progress.editPlan) return { ok: false, requiredNext: 'design_or_revise_edit' };
     if (!progress.soundtrack) return { ok: false, requiredNext: 'generate_editorial_assets' };
     if (visualCueIds(progress).length) return { ok: false, requiredNext: 'generate_visual_asset', visualCuesRemaining: visualCueIds(progress) };
+    // A render that completed but was never watched is not a slot to spend again — design_or_revise_edit
+    // always clears finalCut/editorialReview before producing a revision plan, so finding a finalCut here
+    // with no editorialReview means the model skipped straight from a successful render back to this tool
+    // instead of reviewing it, which would silently burn the whole draft budget with nothing ever recorded
+    // into draftHistory for the exhausted-budget recovery to ship.
+    if (progress.finalCut && !progress.editorialReview) return { ok: false, requiredNext: 'inspect_rendered_draft', instruction: `Draft ${iteration} already rendered and is waiting to be watched. Call inspect_rendered_draft before rendering again.` };
     // A worker crash or lost lease can interrupt a render after it's submitted (progress.render
     // checkpointed) but before the draft is confirmed complete (progress.finalCut). Resuming that
     // must reattach to the same render — renderFinalCut/renderWithFfmpeg already know how to poll
     // an existing cloud job or reuse an already-uploaded output when handed that checkpoint back —
     // rather than silently starting a duplicate render and burning another of the MAX_DRAFTS slots.
     const resumingRender = Boolean(progress.render) && !progress.finalCut;
+    const previousIteration = iteration;
     if (!resumingRender) {
-      if (iteration >= MAX_DRAFTS) return { ok: false, draftLimitReached: true, maximumDrafts: MAX_DRAFTS };
+      // Budget spent with nothing to show. design_or_revise_edit has already tried to rescue this
+      // (draftHistory, then a Cloud Storage sweep for an orphaned render), so reaching here means
+      // there is genuinely nothing to ship and no render left to attempt. This has to END the
+      // invocation, not decline politely: a soft `ok: false` sends the model to
+      // inspect_rendered_draft, which refuses with requiredNext: 'render_edit_draft', which comes
+      // straight back here — a livelock that burns model quota until the lease expires, at which
+      // point the recovery scan re-claims the job and starts it over.
+      if (iteration >= MAX_DRAFTS) {
+        if (await attemptBudgetExhaustedRecovery()) return { ok: true, finalizedFromHistory: true, iteration, decision: 'pass' };
+        fatalToolError = new Error(`All ${MAX_DRAFTS} render drafts were used without producing a reviewable cut, and no completed render could be recovered. The pipeline cannot make further progress on this project.`);
+        toolContext!.invocationContext.endInvocation = true;
+        return { ok: false, fatal: true, draftLimitReached: true, maximumDrafts: MAX_DRAFTS, error: String((fatalToolError as any).message) };
+      }
       iteration += 1; await checkpoint('rendering', { editorialIteration: iteration, render: undefined, finalCut: undefined }, `Agent approved the timeline for execution. Rendering draft ${iteration} of ${MAX_DRAFTS}.`);
     } else {
       await checkpoint('rendering', {}, `Reattaching to the in-flight render for draft ${iteration} of ${MAX_DRAFTS} after a worker restart.`);
@@ -211,6 +235,11 @@ export async function runEditorialAgent(input: JobInput, update: (state: JobStat
       // than errors). Give it one retry for a genuinely transient fault, then end the invocation and
       // let the worker's own bounded, backed-off retry own it instead of spinning here.
       renderFailures += 1;
+      // Give the slot back. MAX_DRAFTS is a budget for *editorial* iterations — plans a reviewer
+      // actually judged — and this render produced nothing to judge. Charging infrastructure
+      // failures against it is how a project ends up at draft 3 of 3 having never once rendered,
+      // which is unrecoverable: there is no draft to ship and no budget left to make one.
+      if (!resumingRender) { iteration = previousIteration; await checkpoint('editing', { editorialIteration: previousIteration }, `Draft ${previousIteration + 1} failed to render and did not consume an editorial draft; ${MAX_DRAFTS - previousIteration} of ${MAX_DRAFTS} remain.`); }
       if (renderFailures < MAX_RENDER_FAILURES) return { ok: false, retryable: true, iteration, renderAttempts: renderFailures, error: String((error as any)?.message || error).slice(0, 500), instruction: 'The render failed. Do not call render_edit_draft again unless you have first changed the plan or the assets it depends on.' };
       fatalToolError = error;
       toolContext!.invocationContext.endInvocation = true;
@@ -267,8 +296,19 @@ Current durable state: ${JSON.stringify(progressSummary(progress))}`,
     for await (const event of runner.runAsync({ userId: input.ownerId, sessionId: input.projectId, newMessage: { role: 'user', parts: [{ text: instruction }] }, runConfig: { maxLlmCalls: 24 } })) {
       const text = stringifyContent(event).trim(); if (text) finalMessage = text;
     }
-    if (fatalToolError) throw fatalToolError;
+    if (fatalToolError) {
+      // Even a genuinely fatal tool error (a render that's failed twice, a budget exhausted with
+      // nothing to ship at the time) can become recoverable once every checkpoint from this same
+      // invocation has landed — attempt the same deterministic recovery here before letting the
+      // whole project fail, rather than only ever trying it from inside the tool call itself.
+      if (progress.analysis && progress.recommendation && await attemptBudgetExhaustedRecovery()) break;
+      throw fatalToolError;
+    }
   }
+  // The model may stop calling tools entirely and just narrate a status report instead of finishing
+  // the lifecycle (that report is what ends up as finalMessage below) — it must not get to bypass the
+  // same budget-exhausted recovery a well-behaved model would have triggered via design_or_revise_edit.
+  if ((!progress.finalCut || progress.editorialReview?.decision !== 'pass') && progress.analysis && progress.recommendation) await attemptBudgetExhaustedRecovery();
   if (!progress.analysis || !progress.soundtrack || !progress.recommendation || !progress.editPlan || !progress.finalCut || progress.editorialReview?.decision !== 'pass') throw new Error(`Editorial agent stopped without an approved rendered draft${finalMessage ? `: ${finalMessage.slice(0, 300)}` : ''}`);
   return { analysis: progress.analysis, soundtrack: progress.soundtrack, recommendation: progress.recommendation, editPlan: progress.editPlan, finalCut: progress.finalCut, editorialReview: progress.editorialReview };
 }

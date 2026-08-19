@@ -20,6 +20,7 @@ export const api = {
     return call(target.finalizeUrl, { method: 'POST', headers: { 'content-type': 'application/json', 'x-video-duration-seconds': String(duration) }, body: '{}' });
   },
   analyze: (id) => call(`/api/projects/${id}/analyze`, { method: 'POST' }),
+  restart: (id) => call(`/api/projects/${id}/restart`, { method: 'POST' }),
   project: (id) => call(`/api/projects/${id}`),
   activity: (id) => call(`/api/projects/${id}/activity`),
   assetUrl: async (projectId, assetId) => { const value = await call(`/api/projects/${projectId}/assets/${assetId}`); return { ...value, url: value.url.startsWith('/') ? `${base}${value.url}` : value.url }; },
