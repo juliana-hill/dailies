@@ -7,7 +7,10 @@ import { renderWithFfmpeg, requiresFfmpeg } from './ffmpegRenderer.js';
 type RenderInput = { projectId: string; ownerId: string; sourceUri: string; sourceDurationSeconds: number; soundtrack: SoundtrackResult; editorialCues?: EditorialAudioCue[]; editPlan: EditPlan; executionAttempt?: number; checkpoint?: RenderCheckpoint };
 
 export async function renderFinalCut(input: RenderInput, onSubmitted?: (checkpoint: RenderCheckpoint) => Promise<void>, onStep?: (message: string) => Promise<void>): Promise<FinalCutResult> {
-  if (requiresFfmpeg(input.editPlan) || (input.soundtrack.cues?.length || 0) > 0 || (input.editorialCues?.some((cue) => cue.type !== 'music' && cue.type !== 'silence') ?? false) || !input.soundtrack.asset) return renderWithFfmpeg(input, onSubmitted, onStep);
+  // The legacy Cloud Transcoder path below has no concept of an additive introOutro card — it only
+  // ever edits the source's own timeline, never splices in new runtime — so any plan using one must
+  // go through the ffmpeg renderer regardless of what requiresFfmpeg alone would decide.
+  if (requiresFfmpeg(input.editPlan) || Boolean(input.editPlan.introOutro?.intro || input.editPlan.introOutro?.outro) || (input.soundtrack.cues?.length || 0) > 0 || (input.editorialCues?.some((cue) => cue.type !== 'music' && cue.type !== 'silence') ?? false) || !input.soundtrack.asset) return renderWithFfmpeg(input, onSubmitted, onStep);
   if (input.sourceDurationSeconds < 5) throw new Error('Cloud Transcoder requires source footage of at least five seconds');
   const project = required('GCP_PROJECT_ID'); const bucket = required('GCS_BUCKET'); const location = process.env.TRANSCODER_LOCATION || 'us-central1';
   const legacyAsset = input.soundtrack.asset!; const soundtrackUri = `gs://${bucket}/${input.ownerId}/${input.projectId}/${legacyAsset.id}/${legacyAsset.fileName}`;

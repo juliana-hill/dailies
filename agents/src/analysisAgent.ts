@@ -15,11 +15,40 @@ Audio is editorial, not wallpaper. Silence and clean dialogue are the default. M
     if (!response.text) throw new Error('Gemini returned no structured analysis');
     const parsed = analysisResultSchema.parse(normalizeAnalysisTimestamps(JSON.parse(response.text), input.durationSeconds));
     if (parsed.projectId !== input.projectId) throw new Error('Gemini project id mismatch');
-    const missing = missingRequiredVisualMoments(parsed);
+    const missing = [...missingRequiredVisualMoments(parsed), ...problematicCuePlacement(parsed)];
     if (!missing.length) return parsed;
-    correction = `\nYour previous analysis omitted required visual coverage: ${missing.join('; ')}. Return a corrected full analysis with genuinely context-specific generated visual cues at those exact editorial moments.`;
+    correction = `\nYour previous analysis had cue-placement problems: ${missing.join('; ')}. Return a corrected full analysis that fixes these exact problems while keeping every other cue.`;
   }
-  throw new Error('Gemini analysis did not provide required intro, reveal, and exit visual coverage after 2 attempts');
+  throw new Error('Gemini analysis did not provide required visual coverage and cue spacing after 2 attempts');
+}
+
+const MIN_SFX_SPACING_SECONDS = 12;
+const SFX_MOTIVATING_SIGNAL_TYPES = new Set(['emphasis', 'reveal', 'momentum_shift', 'overlay_opportunity', 'joke']);
+
+// Cue-placement problems that are wrong no matter what the diagnosis says, checked in code rather
+// than left to prompt language alone: two visuals that would composite on top of each other, and a
+// short "bubble pop"-style sound effect with nothing on screen or in the diagnosis to justify it, or
+// fired too close to the previous one to read as a distinct moment.
+export function problematicCuePlacement(analysis: AnalysisResult): string[] {
+  const problems: string[] = [];
+  const overlaps = (aStart: number, aEnd: number, bStart: number, bEnd: number) => Math.min(aEnd, bEnd) > Math.max(aStart, bStart);
+  const visualCues = analysis.audioCues.filter((cue) => cue.visualGenerationPrompt?.trim()).sort((a, b) => a.startSeconds - b.startSeconds);
+  for (let i = 1; i < visualCues.length; i += 1) {
+    if (overlaps(visualCues[i - 1].startSeconds, visualCues[i - 1].endSeconds, visualCues[i].startSeconds, visualCues[i].endSeconds)) {
+      problems.push(`visual cues ${visualCues[i - 1].id} and ${visualCues[i].id} overlap in time (${visualCues[i - 1].startSeconds.toFixed(1)}-${visualCues[i - 1].endSeconds.toFixed(1)}s vs ${visualCues[i].startSeconds.toFixed(1)}-${visualCues[i].endSeconds.toFixed(1)}s) and would composite on top of each other`);
+    }
+  }
+  const sfxCues = analysis.audioCues.filter((cue) => cue.type === 'pop' || cue.type === 'sting').sort((a, b) => a.startSeconds - b.startSeconds);
+  sfxCues.forEach((cue, index) => {
+    const hasVisual = visualCues.some((visual) => overlaps(visual.startSeconds, visual.endSeconds, cue.startSeconds - 1, cue.endSeconds + 1));
+    const hasSignal = analysis.editingSignals.some((signal) => SFX_MOTIVATING_SIGNAL_TYPES.has(signal.type) && overlaps(signal.startSeconds, signal.endSeconds, cue.startSeconds - 1, cue.endSeconds + 1));
+    if (!hasVisual && !hasSignal) problems.push(`sound-effect cue ${cue.id} at ${cue.startSeconds.toFixed(1)}s has no diagnosed visual moment or editing signal to justify a sound effect there`);
+    if (index > 0) {
+      const gap = cue.startSeconds - sfxCues[index - 1].endSeconds;
+      if (gap < MIN_SFX_SPACING_SECONDS) problems.push(`sound-effect cues ${sfxCues[index - 1].id} and ${cue.id} are only ${gap.toFixed(1)}s apart; space pop/sting cues at least ${MIN_SFX_SPACING_SECONDS}s apart`);
+    }
+  });
+  return problems;
 }
 
 export function missingRequiredVisualMoments(analysis: AnalysisResult): string[] {

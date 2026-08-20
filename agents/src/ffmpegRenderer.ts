@@ -3,7 +3,7 @@ import { copyFile, mkdir, mkdtemp, readdir, rename, rm, stat, writeFile } from '
 import { availableParallelism, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { Storage } from '@google-cloud/storage';
-import { finalCutResultSchema, type EditPlan, type EditorialAudioCue, type FinalCutResult, type RenderCheckpoint, type SoundtrackResult } from '@dailies/shared';
+import { finalCutResultSchema, type EditPlan, type EditorialAudioCue, type FinalCutResult, type IntroOutroCard, type RenderCheckpoint, type SoundtrackResult } from '@dailies/shared';
 
 type Input = { projectId: string; ownerId: string; sourceUri: string; sourceDurationSeconds: number; soundtrack: SoundtrackResult; editorialCues?: EditorialAudioCue[]; editPlan: EditPlan; executionAttempt?: number; checkpoint?: RenderCheckpoint };
 type MusicCue = SoundtrackResult['cues'][number];
@@ -64,6 +64,24 @@ export function buildSegmentStepArgs(sourcePath: string, outputPath: string, pla
 
 export const buildConcatStepArgs = (listPath: string, outputPath: string) => ['-f', 'concat', '-safe', '0', '-i', listPath, '-c', 'copy', '-movflags', '+faststart', outputPath];
 
+// An additive intro/outro card: a fixed-duration clip built from a still image, encoded with the
+// same codec params as buildSegmentStepArgs (aac/48000/stereo/90000 timescale) so it can be spliced
+// into the same stream-copy concat as every other segment. scale2ref matches the image to the real
+// source's dimensions — the same pattern buildOverlayStepArgs uses — since concat requires identical
+// frame size across every file in the sequence. Silent (anullsrc) when the cue has no audio asset.
+export function buildStillCardStepArgs(sourcePath: string, imagePath: string, durationSeconds: number, outputPath: string, audioPath?: string) {
+  const filters = ['[0:v][1:v]scale2ref=w=main_w:h=main_h[scaled][ref]', '[scaled]format=yuv420p,fps=30,setsar=1[vout]'];
+  const args = ['-f', 'image2', '-loop', '1', '-i', imagePath, '-i', sourcePath];
+  args.push(...(audioPath ? ['-i', audioPath] : ['-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo']));
+  // apad: a real cue audio asset shorter than the card's duration (e.g. a 1s pop under a 3s card)
+  // would otherwise leave the output audio track shorter than its video track — apad pads with
+  // silence indefinitely, and the output-level -t below is what actually bounds it.
+  args.push('-filter_complex', filters.join(';'), '-map', '[vout]', '-map', '2:a', '-af', 'apad', '-t', number(durationSeconds).toString(),
+    '-c:v', 'libx264', '-preset', INTERMEDIATE_PRESET, '-crf', INTERMEDIATE_CRF, '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2', '-video_track_timescale', '90000', outputPath);
+  return { outputDuration: durationSeconds, args };
+}
+
 export function buildOverlayStepArgs(basePath: string, overlayPath: string, outputPath: string, cue: Pick<EditorialAudioCue, 'visualMode' | 'position' | 'effectStyle'>, start: number, end: number) {
   const filters: string[] = [];
   // Delay the overlay by PADDING it with transparent frames from t=0, not by pushing its PTS forward.
@@ -94,11 +112,11 @@ export function buildOverlayStepArgs(basePath: string, overlayPath: string, outp
     '-c:v', 'libx264', '-preset', INTERMEDIATE_PRESET, '-crf', INTERMEDIATE_CRF, '-c:a', 'copy', '-shortest', outputPath];
 }
 
-export function buildAudioMixStepArgs(videoPath: string, cuePaths: string[], outputPath: string, cues: MusicCue[], editorialCues: EditorialAudioCue[], segments: EditPlan['segments'], totalDuration: number) {
+export function buildAudioMixStepArgs(videoPath: string, cuePaths: string[], outputPath: string, cues: MusicCue[], editorialCues: EditorialAudioCue[], segments: EditPlan['segments'], totalDuration: number, offsetSeconds = 0) {
   const filters: string[] = [];
   const replacementRanges = editorialCues
     .filter((cue) => cue.dialoguePolicy === 'replace_source_audio')
-    .map((cue) => mapCue(cue, segments))
+    .map((cue) => mapCue(cue, segments, offsetSeconds))
     .filter((range): range is { start: number; end: number } => Boolean(range));
   if (replacementRanges.length) {
     const active = replacementRanges.map((range) => `between(t,${number(range.start)},${number(range.end)})`).join('+');
@@ -106,7 +124,7 @@ export function buildAudioMixStepArgs(videoPath: string, cuePaths: string[], out
   } else filters.push('[0:a]anull[dialogue]');
   const mixed: string[] = [];
   cues.forEach((cue, index) => {
-    const mapped = mapCue(cue, segments); if (!mapped) return;
+    const mapped = mapCue(cue, segments, offsetSeconds); if (!mapped) return;
     const duration = mapped.end - mapped.start; const fadeIn = Math.min(cue.fadeInSeconds, duration / 2); const fadeOut = Math.min(cue.fadeOutSeconds, duration / 2);
     const reelStart = cue.sourceStartSeconds || 0; const reelEnd = cue.sourceEndSeconds || reelStart + duration;
     filters.push(`[${index + 1}:a]atrim=start=${number(reelStart)}:end=${number(Math.min(reelEnd, reelStart + duration))},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=${number(fadeIn)},afade=t=out:st=${number(Math.max(0, duration - fadeOut))}:d=${number(fadeOut)},volume=${number(dbFactor(cue.gainDb))},adelay=${Math.round(mapped.start * 1000)}:all=1,apad,atrim=0:${number(totalDuration)},aformat=sample_rates=48000:channel_layouts=stereo[music${index}]`);
@@ -222,6 +240,17 @@ export async function renderWithFfmpeg(input: Input, onSubmitted?: (checkpoint: 
   const workspace = join(tmpdir(), `dailies-render-${safeId(renderId)}`);
   const segments = input.editPlan.segments.filter((segment) => segment.action !== 'remove');
   if (!segments.length) throw new Error('Edit plan removed the entire source video');
+  // An introOutro card is genuinely additional runtime spliced before/after the real segments, never
+  // an overlay on top of them — see buildStillCardStepArgs. Its duration comes from the referenced
+  // cue's own timing (endSeconds-startSeconds), which is otherwise irrelevant once introOutro claims
+  // it: that cue no longer describes a window to composite onto the source timeline at all.
+  const introOutro = input.editPlan.introOutro;
+  const findIntroOutroCue = (cueId: string | undefined) => cueId ? (input.editorialCues || []).find((cue) => cue.id === cueId) : undefined;
+  const introCue = findIntroOutroCue(introOutro?.intro?.cueId);
+  const outroCue = findIntroOutroCue(introOutro?.outro?.cueId);
+  const introDuration = introCue ? introCue.endSeconds - introCue.startSeconds : 0;
+  const outroDuration = outroCue ? outroCue.endSeconds - outroCue.startSeconds : 0;
+  const introOutroCueIds = new Set([introOutro?.intro?.cueId, introOutro?.outro?.cueId].filter((id): id is string => Boolean(id)));
   // A step output is only trustworthy if it was published by the atomic rename in `step` below.
   // Workspaces written by an earlier build can hold a truncated intermediate that still satisfies the
   // resume check, and such a workspace can never make progress again — every attempt skips the broken
@@ -278,7 +307,25 @@ export async function renderWithFfmpeg(input: Input, onSubmitted?: (checkpoint: 
         ]);
       }
 
-      let index = 0; let totalDuration = 0; const segmentPaths: string[] = [];
+      let index = 0; let totalDuration = introDuration; const segmentPaths: string[] = [];
+      // An additive card, built from either a still image (generated_card) or a real reused interval
+      // the plan already marked remove (removed_footage — literally reuses buildSegmentStepArgs, the
+      // same function every ordinary cut goes through). Spliced into segmentPaths before the concat
+      // list is written, so it becomes real runtime rather than something composited on top of it.
+      const buildIntroOutroStep = async (card: IntroOutroCard, cue: EditorialAudioCue, label: 'intro' | 'outro') => {
+        if (card.source === 'removed_footage') {
+          const synthetic: EditPlan['segments'][number] = { id: `${label}-card`, sourceStartSeconds: card.footageStartSeconds!, sourceEndSeconds: card.footageEndSeconds!, action: 'keep', playbackRate: 1, originalAudioGainDb: 0, soundtrackGainDb: -96, transition: 'cut', reason: `${label} card reusing removed footage` };
+          return step(index += 1, `${label}-card`, `${label === 'intro' ? 'Intro' : 'Outro'} card: reused footage ${number(card.footageStartSeconds!)}s\u2013${number(card.footageEndSeconds!)}s`, (outputPath) => buildSegmentStepArgs(sourcePath, outputPath, input.editPlan, synthetic).args);
+        }
+        const imagePath = visualPaths.get(cue.id);
+        if (!imagePath) throw new Error(`${label} card cue ${cue.id} has no generated visual asset`);
+        const musicCueIndex = cues.findIndex((item) => item.id === cue.id);
+        const audioPath = musicCueIndex >= 0 ? cuePaths[musicCueIndex] : undefined;
+        const duration = cue.endSeconds - cue.startSeconds;
+        return step(index += 1, `${label}-card`, `${label === 'intro' ? 'Intro' : 'Outro'} card: generated visual, ${number(duration)}s`, (outputPath) => buildStillCardStepArgs(sourcePath, imagePath, duration, outputPath, audioPath).args);
+      };
+      if (introOutro?.intro && introCue) segmentPaths.push(await buildIntroOutroStep(introOutro.intro, introCue, 'intro'));
+
       for (const [position, segment] of segments.entries()) {
         const built = buildSegmentStepArgs(sourcePath, '', input.editPlan, segment);
         totalDuration += built.outputDuration;
@@ -286,14 +333,22 @@ export async function renderWithFfmpeg(input: Input, onSubmitted?: (checkpoint: 
           (outputPath) => buildSegmentStepArgs(sourcePath, outputPath, input.editPlan, segment).args));
       }
 
+      if (introOutro?.outro && outroCue) { segmentPaths.push(await buildIntroOutroStep(introOutro.outro, outroCue, 'outro')); totalDuration += outroDuration; }
+
       const listPath = join(workspace, 'segments.txt');
       await writeFile(listPath, segmentPaths.map((path) => `file '${path.replace(/'/g, "'\\''")}'`).join('\n'));
-      let current = await step(index += 1, 'assembled', `Assembled ${segments.length} cuts into one timeline`, (outputPath) => buildConcatStepArgs(listPath, outputPath));
+      let current = await step(index += 1, 'assembled', `Assembled ${segmentPaths.length} cuts into one timeline`, (outputPath) => buildConcatStepArgs(listPath, outputPath));
 
       // One pass per visual cue, each composited onto the previous step's output. A cue that wedges
       // now names itself in the logs and is killed by the watchdog on its own, instead of taking an
       // entire monolithic graph — and everything already composited before it is kept.
-      const overlays = (input.editorialCues || []).map((cue) => ({ cue, mapped: mapCue(cue, segments), path: visualPaths.get(cue.id) })).filter((entry) => entry.mapped && entry.path);
+      // Defensive dedup by cue id: whatever produced input.editorialCues should never contain the
+      // same cue twice, but compositing a duplicate would silently double-expose that one visual, so
+      // guard against it here regardless of how it got in. introOutro cues are excluded outright —
+      // their card was already spliced in above as additional runtime, not composited as an overlay.
+      const overlayCues = (input.editorialCues || []).filter((cue) => !introOutroCueIds.has(cue.id));
+      const overlays = overlayCues.filter((cue, index, all) => all.findIndex((other) => other.id === cue.id) === index)
+        .map((cue) => ({ cue, mapped: mapCue(cue, segments, introDuration), path: visualPaths.get(cue.id) })).filter((entry) => entry.mapped && entry.path);
       for (const [position, entry] of overlays.entries()) {
         const start = entry.mapped!.start;
         const span = entry.mapped!.end - entry.mapped!.start;
@@ -303,15 +358,23 @@ export async function renderWithFfmpeg(input: Input, onSubmitted?: (checkpoint: 
           (outputPath) => buildOverlayStepArgs(base, entry.path!, outputPath, entry.cue, start, end));
       }
 
-      const mixed = await step(index += 1, 'audio-mix', `Mixed ${cues.length} audio cue${cues.length === 1 ? '' : 's'} under the dialogue`,
-        (outputPath) => buildAudioMixStepArgs(current, cuePaths, outputPath, cues, input.editorialCues || [], segments, totalDuration));
+      // introOutro cues are excluded here too — their audio is already baked into the spliced card
+      // clip itself (buildIntroOutroStep), so mixing it again would duplicate it. cuePaths must stay
+      // index-aligned with cues (buildAudioMixStepArgs maps cues[i] to input stream [i+1:a]), so both
+      // are filtered together rather than filtering cues alone. offsetSeconds shifts every remaining
+      // cue's mapped position to account for the prepended intro's runtime.
+      const keptCueIndices = cues.map((_cue, cueIndex) => cueIndex).filter((cueIndex) => !introOutroCueIds.has(cues[cueIndex].id));
+      const mixCues = keptCueIndices.map((cueIndex) => cues[cueIndex]);
+      const mixCuePaths = keptCueIndices.map((cueIndex) => cuePaths[cueIndex]);
+      const mixed = await step(index += 1, 'audio-mix', `Mixed ${mixCues.length} audio cue${mixCues.length === 1 ? '' : 's'} under the dialogue`,
+        (outputPath) => buildAudioMixStepArgs(current, mixCuePaths, outputPath, mixCues, overlayCues, segments, totalDuration, introDuration));
       await copyFile(mixed, finalPath);
       await log(`Render complete: ${Math.round(totalDuration)}s across ${index} steps.`);
       if (!mount) await storage.bucket(bucket).upload(finalPath, { destination: outputKey, contentType: 'video/mp4', resumable: true, metadata: { cacheControl: 'private, max-age=0' } });
       await rm(workspace, { recursive: true, force: true });
       return finalCutResultSchema.parse({ asset: { id: renderId, kind: 'rendered_video', fileName: 'enhanced-final-cut.mp4', mimeType: 'video/mp4', generationModel: 'ffmpeg-node-media-pipeline', createdAt: new Date().toISOString() }, durationSeconds: totalDuration, renderProvider: 'ffmpeg-cloud-run', renderJobId: checkpoint.renderJobId });
     }
-    const durationSeconds = segments.reduce((sum, segment) => sum + (segment.sourceEndSeconds - segment.sourceStartSeconds) / (segment.playbackRate || 1), 0);
+    const durationSeconds = introDuration + outroDuration + segments.reduce((sum, segment) => sum + (segment.sourceEndSeconds - segment.sourceStartSeconds) / (segment.playbackRate || 1), 0);
     await rm(workspace, { recursive: true, force: true });
     return finalCutResultSchema.parse({ asset: { id: renderId, kind: 'rendered_video', fileName: 'enhanced-final-cut.mp4', mimeType: 'video/mp4', generationModel: 'ffmpeg-node-media-pipeline', createdAt: new Date().toISOString() }, durationSeconds, renderProvider: 'ffmpeg-cloud-run', renderJobId: checkpoint.renderJobId });
   } catch (error) {
@@ -366,7 +429,10 @@ export async function renderCuePreview(input: { projectId: string; ownerId: stri
   }
 }
 const atempo = (rate: number) => { const values: number[] = []; let remaining = rate; while (remaining > 2) { values.push(2); remaining /= 2; } values.push(remaining); return values.map((value) => `atempo=${number(value)}`); };
-const mapCue = (cue: Pick<EditorialAudioCue, 'startSeconds' | 'endSeconds'>, segments: EditPlan['segments']) => { let cursor = 0; const ranges: Array<{ start: number; end: number }> = []; for (const segment of segments) { if (segment.action === 'remove') continue; const rate = segment.playbackRate || 1; const overlapStart = Math.max(cue.startSeconds, segment.sourceStartSeconds); const overlapEnd = Math.min(cue.endSeconds, segment.sourceEndSeconds); if (overlapEnd > overlapStart) ranges.push({ start: cursor + (overlapStart - segment.sourceStartSeconds) / rate, end: cursor + (overlapEnd - segment.sourceStartSeconds) / rate }); cursor += (segment.sourceEndSeconds - segment.sourceStartSeconds) / rate; } if (!ranges.length) return undefined; return { start: ranges[0].start, end: ranges[0].start + ranges.reduce((sum, range) => sum + range.end - range.start, 0) }; };
+// offsetSeconds shifts every mapped position later by however much additive intro time was spliced
+// in before segment 0 (see introDuration in renderWithFfmpeg) — segments themselves are still timed
+// from their own cursor at 0, this just accounts for the prepended card that isn't one of them.
+const mapCue = (cue: Pick<EditorialAudioCue, 'startSeconds' | 'endSeconds'>, segments: EditPlan['segments'], offsetSeconds = 0) => { let cursor = offsetSeconds; const ranges: Array<{ start: number; end: number }> = []; for (const segment of segments) { if (segment.action === 'remove') continue; const rate = segment.playbackRate || 1; const overlapStart = Math.max(cue.startSeconds, segment.sourceStartSeconds); const overlapEnd = Math.min(cue.endSeconds, segment.sourceEndSeconds); if (overlapEnd > overlapStart) ranges.push({ start: cursor + (overlapStart - segment.sourceStartSeconds) / rate, end: cursor + (overlapEnd - segment.sourceStartSeconds) / rate }); cursor += (segment.sourceEndSeconds - segment.sourceStartSeconds) / rate; } if (!ranges.length) return undefined; return { start: ranges[0].start, end: ranges[0].start + ranges.reduce((sum, range) => sum + range.end - range.start, 0) }; };
 const effectiveCues = (soundtrack: SoundtrackResult, durationSeconds: number): MusicCue[] => soundtrack.cues?.length ? soundtrack.cues : soundtrack.asset && soundtrack.durationSeconds && soundtrack.prompt ? [{ id: 'legacy-continuous-score', startSeconds: 0, endSeconds: durationSeconds, type: 'music', purpose: 'Preserve a legacy continuous soundtrack.', mood: 'legacy', energy: .5, gainDb: -18, fadeInSeconds: .5, fadeOutSeconds: .75, dialoguePolicy: 'duck_under_dialogue', visualCompanion: '', asset: soundtrack.asset, durationSeconds: soundtrack.durationSeconds, prompt: soundtrack.prompt }] : [];
 const dbFactor = (gainDb: number) => gainDb <= -90 ? 0 : 10 ** (gainDb / 20);
 const hasVisualTreatment = (value?: { brightness: number; contrast: number; saturation: number; temperature: number }) => Boolean(value && (value.brightness || value.contrast || value.saturation || value.temperature));

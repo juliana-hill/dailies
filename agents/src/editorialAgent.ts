@@ -2,7 +2,7 @@ import { FunctionTool, InMemorySessionService, LlmAgent, Runner, stringifyConten
 import { Type } from '@google/genai';
 import { Storage } from '@google-cloud/storage';
 import { editorialAudioCueSchema, editorialReviewSchema, finalCutResultSchema, generatedMusicCueSchema, type CompleteProjectReport, type DraftHistoryEntry, type Project, type ProjectStatus } from '@dailies/shared';
-import { analyzeVideo } from './analysisAgent.js';
+import { analyzeVideo, problematicCuePlacement } from './analysisAgent.js';
 import { createEditPlan } from './editingAgent.js';
 import { EMOJI_LIBRARY, LIBRARY_GCS_PREFIX, SFX_LIBRARY } from './library.js';
 import { renderCuePreview } from './ffmpegRenderer.js';
@@ -167,6 +167,11 @@ export async function runEditorialAgent(input: JobInput, update: (state: JobStat
     const cue = generatedMusicCueSchema.parse({ ...shared, asset, durationSeconds: entry.durationSeconds, prompt: `Library sound effect: ${entry.label}` });
     const audioCue = editorialAudioCueSchema.parse(shared);
     const analysis = { ...progress.analysis, audioCues: [...progress.analysis.audioCues, audioCue] };
+    // Same cue-placement rules the initial diagnosis is held to (no overlapping visuals, sound
+    // effects only where a visual/signal earns one, minimum spacing) — this tool mutates audioCues
+    // directly and bypasses that retry loop, so it has to re-check itself before committing.
+    const problems = problematicCuePlacement(analysis).filter((problem) => problem.includes(cueId));
+    if (problems.length) return { ok: false, error: `That timestamp/position conflicts with an existing cue: ${problems.join('; ')}. Pick a different timestamp or drop this fill.` };
     const soundtrack = { ...progress.soundtrack, cues: [...progress.soundtrack.cues, cue] };
     await checkpoint('editing', { analysis, soundtrack }, `Filled a reviewer-flagged pacing gap at ${startSeconds.toFixed(1)}-${endSeconds.toFixed(1)}s with library sound effect "${entry.label}"${visualGenerationPrompt?.trim() ? ' and a new sticker' : ''}.`);
     return { ok: true, cueId, assetId: asset.id, requiresVisual: Boolean(visualGenerationPrompt?.trim()) };

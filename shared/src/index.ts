@@ -140,12 +140,23 @@ export const editSegmentSchema = z.object({
   soundtrackGainDb: z.number().min(-96).max(6).default(-18), transition: z.enum(['cut', 'dissolve']).default('cut'),
   visualTreatment: z.object({ brightness: z.number().min(-1).max(1).default(0), contrast: z.number().min(-1).max(1).default(0), saturation: z.number().min(-1).max(1).default(0), temperature: z.number().min(-1).max(1).default(0) }).optional(),
 }).refine((value) => value.sourceEndSeconds > value.sourceStartSeconds, { message: 'Edit segment end must follow start' });
+// An intro/outro card is spliced in as genuinely additional runtime, never overlaid on top of the
+// opening/closing seconds of retained dialogue. `cueId` points at an existing full_frame audioCue,
+// whose own endSeconds-startSeconds becomes the inserted clip's duration. `removed_footage` lets the
+// card reuse a real interval the plan is already discarding (validateIntroOutro in editingAgent.ts
+// enforces that window is covered only by `remove`-action segments) instead of a generated still.
+export const introOutroCardSchema = z.object({
+  cueId: z.string().min(1), source: z.enum(['generated_card', 'removed_footage']),
+  footageStartSeconds: z.number().nonnegative().optional(), footageEndSeconds: z.number().positive().optional(),
+}).refine((value) => value.source !== 'removed_footage' || (value.footageStartSeconds !== undefined && value.footageEndSeconds !== undefined && value.footageEndSeconds > value.footageStartSeconds), { message: 'removed_footage source requires footageStartSeconds and footageEndSeconds' });
+export type IntroOutroCard = z.infer<typeof introOutroCardSchema>;
 export const editPlanSchema = z.object({
   projectId: z.string().min(1), segments: z.array(editSegmentSchema).min(1), rationale: z.string().min(1),
   originalAudioGainDb: z.number().max(0).default(0), soundtrackGainDb: z.number().max(0).default(-18),
   targetDurationSeconds: z.number().positive().optional(), expectedViewerScore: viewerScoreSchema.optional(),
   audioCleanup: z.object({ reduceNoise: z.boolean().default(false), removeHum: z.boolean().default(false), highPassHz: z.number().min(40).max(200).default(80), targetLufs: z.number().min(-24).max(-8).default(-14) }).default({}),
   visualStrategy: z.string().default('Balance exposure and color conservatively while protecting skin tones.'),
+  introOutro: z.object({ intro: introOutroCardSchema.optional(), outro: introOutroCardSchema.optional() }).optional(),
 });
 export type EditPlan = z.infer<typeof editPlanSchema>;
 
