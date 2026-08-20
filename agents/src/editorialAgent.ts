@@ -245,10 +245,13 @@ export async function runEditorialAgent(input: JobInput, update: (state: JobStat
       // failures against it is how a project ends up at draft 3 of 3 having never once rendered,
       // which is unrecoverable: there is no draft to ship and no budget left to make one.
       if (!resumingRender) { iteration = previousIteration; await checkpoint('editing', { editorialIteration: previousIteration }, `Draft ${previousIteration + 1} failed to render and did not consume an editorial draft; ${MAX_DRAFTS - previousIteration} of ${MAX_DRAFTS} remain.`); }
-      if (renderFailures < MAX_RENDER_FAILURES) return { ok: false, retryable: true, iteration, renderAttempts: renderFailures, error: String((error as any)?.message || error).slice(0, 500), instruction: 'The render failed. Do not call render_edit_draft again unless you have first changed the plan or the assets it depends on.' };
+      // Slice from the tail: ffmpeg's diagnostic (already trimmed to its own last stderr lines) puts
+      // the actual terminal error at the end, so front-truncating here would hand the model nothing
+      // but leading input-probe banner noise instead of the reason it actually failed.
+      if (renderFailures < MAX_RENDER_FAILURES) return { ok: false, retryable: true, iteration, renderAttempts: renderFailures, error: String((error as any)?.message || error).slice(-500), instruction: 'The render failed. Do not call render_edit_draft again unless you have first changed the plan or the assets it depends on.' };
       fatalToolError = error;
       toolContext!.invocationContext.endInvocation = true;
-      return { ok: false, fatal: true, retryableByWorker: true, iteration, renderAttempts: renderFailures, error: String((error as any)?.message || error).slice(0, 500) };
+      return { ok: false, fatal: true, retryableByWorker: true, iteration, renderAttempts: renderFailures, error: String((error as any)?.message || error).slice(-500) };
     }
     renderFailures = 0;
     await checkpoint('rendering', { finalCut }, `Draft ${iteration} rendered successfully (${Math.round(finalCut.durationSeconds)} seconds). It is not final until the agent watches and approves it.`);

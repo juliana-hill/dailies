@@ -70,13 +70,20 @@ export const buildConcatStepArgs = (listPath: string, outputPath: string) => ['-
 // source's dimensions — the same pattern buildOverlayStepArgs uses — since concat requires identical
 // frame size across every file in the sequence. Silent (anullsrc) when the cue has no audio asset.
 export function buildStillCardStepArgs(sourcePath: string, imagePath: string, durationSeconds: number, outputPath: string, audioPath?: string) {
-  const filters = ['[0:v][1:v]scale2ref=w=main_w:h=main_h[scaled][ref]', '[scaled]format=yuv420p,fps=30,setsar=1[vout]'];
+  // apad lives inside the complex graph, not as a separate -af: ffmpeg rejects a plain -af/-vf on
+  // any output when -filter_complex is also present in the command ("... which is fed from a complex
+  // filtergraph. -af/-vf/-filter is not permitted for it"), even when that particular stream isn't
+  // itself one of the complex graph's outputs. A real cue audio asset shorter than the card's
+  // duration (e.g. a 1s pop under a 3s card) would otherwise leave the audio track shorter than the
+  // video track — apad pads with silence indefinitely, and the output-level -t below bounds it.
+  // scale2ref's second output pad ([ref], a passthrough of the reference input) is only useful when
+  // something downstream also needs the unscaled reference frames — here nothing does, but ffmpeg
+  // still requires every declared filter output to be connected to something. nullsink discards it
+  // without producing a mapped stream, satisfying that requirement.
+  const filters = ['[0:v][1:v]scale2ref=w=main_w:h=main_h[scaled][ref]', '[ref]nullsink', '[scaled]format=yuv420p,fps=30,setsar=1[vout]', '[2:a]apad[aout]'];
   const args = ['-f', 'image2', '-loop', '1', '-i', imagePath, '-i', sourcePath];
   args.push(...(audioPath ? ['-i', audioPath] : ['-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo']));
-  // apad: a real cue audio asset shorter than the card's duration (e.g. a 1s pop under a 3s card)
-  // would otherwise leave the output audio track shorter than its video track — apad pads with
-  // silence indefinitely, and the output-level -t below is what actually bounds it.
-  args.push('-filter_complex', filters.join(';'), '-map', '[vout]', '-map', '2:a', '-af', 'apad', '-t', number(durationSeconds).toString(),
+  args.push('-filter_complex', filters.join(';'), '-map', '[vout]', '-map', '[aout]', '-t', number(durationSeconds).toString(),
     '-c:v', 'libx264', '-preset', INTERMEDIATE_PRESET, '-crf', INTERMEDIATE_CRF, '-pix_fmt', 'yuv420p',
     '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2', '-video_track_timescale', '90000', outputPath);
   return { outputDuration: durationSeconds, args };

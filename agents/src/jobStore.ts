@@ -148,7 +148,11 @@ export class FirestoreJobStore {
     await this.firestore.runTransaction(async (transaction) => {
       const snapshot = await transaction.get(reference); if (!snapshot.exists) return;
       const current = snapshot.data() as DurableJob; if (current.leaseOwner !== workerId) return;
-      const message = String((error as any)?.message || error || 'Unknown pipeline failure').slice(0, 500); const now = new Date().toISOString();
+      // Slice from the tail, not the head: a long message (e.g. ffmpeg's diagnostic, which is itself
+      // already trimmed to its last stderr lines) puts the actual terminal error at the end — front-
+      // truncating discards exactly the part that explains the failure and keeps only leading banner
+      // noise. Short messages are unaffected either way.
+      const message = String((error as any)?.message || error || 'Unknown pipeline failure').slice(-500); const now = new Date().toISOString();
       const next = { ...current, status: 'failed', error: message, leaseOwner: undefined, leaseExpiresAt: undefined, updatedAt: now };
       transaction.set(reference, next);
       transaction.set(projectReference, { status: 'failed', statusMessage: statusMessage.failed, progress: current.progress, error: message, updatedAt: now }, { merge: true });
@@ -161,7 +165,7 @@ export class FirestoreJobStore {
     await this.firestore.runTransaction(async (transaction) => {
       const snapshot = await transaction.get(reference); if (!snapshot.exists) return;
       const current = snapshot.data() as DurableJob; if (current.leaseOwner !== workerId) return;
-      const message = String((error as any)?.message || error || 'Transient pipeline failure').slice(0, 500); const nowMs = Date.now(); const now = new Date(nowMs).toISOString();
+      const message = String((error as any)?.message || error || 'Transient pipeline failure').slice(-500); const nowMs = Date.now(); const now = new Date(nowMs).toISOString();
       const next = { ...current, status: 'queued', error: message, recoveryCount: (current.recoveryCount || 0) + 1, nextAttemptAt: new Date(nowMs + delayMilliseconds).toISOString(), leaseOwner: undefined, leaseExpiresAt: undefined, updatedAt: now };
       transaction.set(reference, next);
       this.appendEvent(transaction, reference, next, 'retry_scheduled', 'queued', workerId, `${message}; retry in ${Math.ceil(delayMilliseconds / 1000)} seconds`);
@@ -173,7 +177,7 @@ export class FirestoreJobStore {
     await this.firestore.runTransaction(async (transaction) => {
       const snapshot = await transaction.get(reference); if (!snapshot.exists) return;
       const current = snapshot.data() as DurableJob; if (current.leaseOwner !== workerId) return;
-      const message = String((error as any)?.message || error || 'Required service is not configured').slice(0, 500); const now = new Date().toISOString();
+      const message = String((error as any)?.message || error || 'Required service is not configured').slice(-500); const now = new Date().toISOString();
       const next = { ...current, status: 'waiting_for_service', error: message, nextAttemptAt: undefined, leaseOwner: undefined, leaseExpiresAt: undefined, updatedAt: now };
       transaction.set(reference, next);
       transaction.set(projectReference, { status: 'waiting_for_service', statusMessage: statusMessage.waiting_for_service, progress: current.progress, error: message, updatedAt: now }, { merge: true });
