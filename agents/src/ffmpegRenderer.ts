@@ -66,22 +66,25 @@ export const buildConcatStepArgs = (listPath: string, outputPath: string) => ['-
 
 // An additive intro/outro card: a fixed-duration clip built from a still image, encoded with the
 // same codec params as buildSegmentStepArgs (aac/48000/stereo/90000 timescale) so it can be spliced
-// into the same stream-copy concat as every other segment. scale2ref matches the image to the real
-// source's dimensions — the same pattern buildOverlayStepArgs uses — since concat requires identical
-// frame size across every file in the sequence. Silent (anullsrc) when the cue has no audio asset.
-export function buildStillCardStepArgs(sourcePath: string, imagePath: string, durationSeconds: number, outputPath: string, audioPath?: string) {
+// into the same stream-copy concat as every other segment. The concat step stream-copies every file
+// with no re-encode, so this card's encoded pixel dimensions must match the source's EXACTLY — a
+// mismatch doesn't just letterbox oddly, it makes many players stretch every later segment into
+// whatever dimensions this (often first) segment declared, i.e. the rest of the video looks squished.
+// width/height are therefore probed from the real source ahead of time (see probeVideoDimensions)
+// and baked into a literal scale+pad, rather than left to a dynamic reference filter. The image is
+// fit (not stretched) within that frame and letterboxed with black to fill it exactly, since a
+// generated/library still image's own aspect ratio won't always match the source's. Silent (anullsrc)
+// when the cue has no audio asset.
+export function buildStillCardStepArgs(width: number, height: number, imagePath: string, durationSeconds: number, outputPath: string, audioPath?: string) {
   // apad lives inside the complex graph, not as a separate -af: ffmpeg rejects a plain -af/-vf on
   // any output when -filter_complex is also present in the command ("... which is fed from a complex
   // filtergraph. -af/-vf/-filter is not permitted for it"), even when that particular stream isn't
   // itself one of the complex graph's outputs. A real cue audio asset shorter than the card's
   // duration (e.g. a 1s pop under a 3s card) would otherwise leave the audio track shorter than the
   // video track — apad pads with silence indefinitely, and the output-level -t below bounds it.
-  // scale2ref's second output pad ([ref], a passthrough of the reference input) is only useful when
-  // something downstream also needs the unscaled reference frames — here nothing does, but ffmpeg
-  // still requires every declared filter output to be connected to something. nullsink discards it
-  // without producing a mapped stream, satisfying that requirement.
-  const filters = ['[0:v][1:v]scale2ref=w=main_w:h=main_h[scaled][ref]', '[ref]nullsink', '[scaled]format=yuv420p,fps=30,setsar=1[vout]', '[2:a]apad[aout]'];
-  const args = ['-f', 'image2', '-loop', '1', '-i', imagePath, '-i', sourcePath];
+  const w = Math.round(width); const h = Math.round(height);
+  const filters = [`[0:v]scale=w=${w}:h=${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p,fps=30[vout]`, '[1:a]apad[aout]'];
+  const args = ['-f', 'image2', '-loop', '1', '-i', imagePath];
   args.push(...(audioPath ? ['-i', audioPath] : ['-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo']));
   args.push('-filter_complex', filters.join(';'), '-map', '[vout]', '-map', '[aout]', '-t', number(durationSeconds).toString(),
     '-c:v', 'libx264', '-preset', INTERMEDIATE_PRESET, '-crf', INTERMEDIATE_CRF, '-pix_fmt', 'yuv420p',
@@ -315,6 +318,9 @@ export async function renderWithFfmpeg(input: Input, onSubmitted?: (checkpoint: 
       }
 
       let index = 0; let totalDuration = introDuration; const segmentPaths: string[] = [];
+      // Probed once, lazily — most projects have no introOutro at all, and a removed_footage card
+      // never needs it (buildSegmentStepArgs already inherits the source's own native resolution).
+      let sourceDimensions: { width: number; height: number } | undefined;
       // An additive card, built from either a still image (generated_card) or a real reused interval
       // the plan already marked remove (removed_footage — literally reuses buildSegmentStepArgs, the
       // same function every ordinary cut goes through). Spliced into segmentPaths before the concat
@@ -329,7 +335,8 @@ export async function renderWithFfmpeg(input: Input, onSubmitted?: (checkpoint: 
         const musicCueIndex = cues.findIndex((item) => item.id === cue.id);
         const audioPath = musicCueIndex >= 0 ? cuePaths[musicCueIndex] : undefined;
         const duration = cue.endSeconds - cue.startSeconds;
-        return step(index += 1, `${label}-card`, `${label === 'intro' ? 'Intro' : 'Outro'} card: generated visual, ${number(duration)}s`, (outputPath) => buildStillCardStepArgs(sourcePath, imagePath, duration, outputPath, audioPath).args);
+        sourceDimensions ||= await probeVideoDimensions(sourcePath);
+        return step(index += 1, `${label}-card`, `${label === 'intro' ? 'Intro' : 'Outro'} card: generated visual, ${number(duration)}s`, (outputPath) => buildStillCardStepArgs(sourceDimensions!.width, sourceDimensions!.height, imagePath, duration, outputPath, audioPath).args);
       };
       if (introOutro?.intro && introCue) segmentPaths.push(await buildIntroOutroStep(introOutro.intro, introCue, 'intro'));
 
@@ -460,6 +467,22 @@ function stickerPosition(position: string | undefined, comicBubble: boolean, sta
   return { x, y };
 }
 const objectKey = (uri: string, bucket: string) => { const prefix = `gs://${bucket}/`; if (!uri.startsWith(prefix)) throw new Error('Source video must use the configured GCS bucket'); return decodeURIComponent(uri.slice(prefix.length)); };
+// The source's real encoded pixel dimensions, for buildStillCardStepArgs — see that function's
+// comment for why an intro/outro card must match these exactly rather than infer them at filter time.
+async function probeVideoDimensions(path: string): Promise<{ width: number; height: number }> {
+  const ffprobe = process.env.FFPROBE_PATH || 'ffprobe';
+  const stdout = await new Promise<string>((resolve, reject) => {
+    const child = spawn(ffprobe, ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=s=x:p=0', path], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = ''; let err = '';
+    child.stdout.on('data', (chunk) => { out += chunk; });
+    child.stderr.on('data', (chunk) => { err += chunk; });
+    child.on('error', reject);
+    child.on('close', (code) => code === 0 ? resolve(out) : reject(new Error(`ffprobe failed (${code}): ${err.trim().slice(-500)}`)));
+  });
+  const [width, height] = stdout.trim().split('x').map(Number);
+  if (!width || !height) throw new Error(`ffprobe returned no usable dimensions for ${path}: "${stdout.trim()}"`);
+  return { width, height };
+}
 const hasOutput = async (path: string) => { try { return (await stat(path)).size > 0; } catch { return false; } };
 // -progress pipe:1 makes ffmpeg emit periodic frame/time/speed lines on stdout so the encode is
 // observable from `docker compose logs` instead of being a silent black box.
