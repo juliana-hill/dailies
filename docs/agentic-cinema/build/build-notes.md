@@ -4,10 +4,10 @@ This file records decisions made during the guided planning and implementation p
 
 ## Existing source materials
 
-- `docs/dailies_hackathon_plan.md` — original concept and technical outline.
-- `docs/hackathon-guidelines-rule.md` — supplied hackathon rules and resources.
-- `docs/dailies_devpost_submission_draft.md` — initial submission narrative.
-- `docs/implementation-plan.md` — researched implementation plan.
+- `docs/agentic-cinema/dailies_hackathon_plan.md` — original concept and technical outline.
+- `docs/agentic-cinema/hackathon-guidelines-rule.md` — supplied hackathon rules and resources.
+- `docs/agentic-cinema/dailies_devpost_submission_draft.md` — initial submission narrative.
+- `docs/agentic-cinema/implementation-plan.md` — researched implementation plan.
 
 ## Initial implementation decisions
 
