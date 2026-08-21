@@ -4,6 +4,53 @@
     "partner_track": "ClickHouse",
     "deadline": "2026-09-07T14:00:00-07:00"
   },
+  "submissions": {
+    "agentic-cinema": {
+      "event_name": "Agentic Cinema: The Blockbuster Hackathon",
+      "partner_track": "ClickHouse",
+      "deadline": "2026-09-07T14:00:00-07:00",
+      "deadline_source": "docs/agentic-cinema/dailies_hackathon_plan.md",
+      "devpost_url": null,
+      "submission_url": null,
+      "hosted_project_url": null,
+      "repository_url": null,
+      "demo_video_url": null,
+      "status": "planning",
+      "verification_needed": ["live Devpost deadline", "hosted URL", "public repository", "demo video"],
+      "checklist": {
+        "public_repo": false,
+        "open_source_license": true,
+        "hosted_project": false,
+        "clickhouse_mcp_runtime_proof": true,
+        "architecture_diagram": false,
+        "demo_video_under_3_minutes": false,
+        "submission_form_complete": false
+      }
+    },
+    "all-things-agentic": {
+      "event_name": "All Things Agentic Hackathon",
+      "track": "Taskmaster",
+      "deadline": "2026-08-31T17:00:00-07:00",
+      "deadline_source": "docs/all-things-agentic/hackathon-guidelines-rules.md",
+      "devpost_url": null,
+      "submission_url": null,
+      "hosted_project_url": null,
+      "repository_url": null,
+      "demo_video_url": null,
+      "status": "planning",
+      "verification_needed": ["live Devpost deadline", "Gemini model requirement", "hosted URL or deployment proof", "public repository", "demo video"],
+      "checklist": {
+        "public_repo": false,
+        "open_source_license": true,
+        "hosted_project": false,
+        "google_framework_runtime_proof": true,
+        "google_cloud_infrastructure_proof": true,
+        "architecture_diagram": false,
+        "demo_video_about_4_minutes": false,
+        "submission_form_complete": false
+      }
+    }
+  },
   "project": {
     "name": "Dailies",
     "summary": "An agentic post-production assistant that connects video analysis, generated score, and creator retention data.",
